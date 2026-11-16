@@ -174,19 +174,26 @@ static void craftingPanel(Rectangle area) {
         drawItemIcon(r.out, row.x + 6, row.y + 4, 44);
         DrawText(TextFormat("%s%s", ITEMS[r.out].name, r.n > 1 ? TextFormat(" x%d", r.n) : ""), row.x + 58, row.y + 4, 18, ok ? TEXT : DIM);
         float ix = row.x + 58;
+        std::string partTip;   // hovering an ingredient or station beats the row's own tooltip
         for (auto& in : r.in) {
             if (!in.item) continue;
             int have = countItem(g->pl.inv, INV_SLOTS, in.item);
             drawItemIcon(in.item, ix, row.y + 26, 20);
             const char* t = TextFormat("%d/%d", have, in.n);
+            int tw = MeasureText(t, 14);
             DrawText(t, ix + 22, row.y + 30, 14, have >= in.n ? Color{160, 230, 140, 255} : Color{240, 120, 100, 255});
-            ix += 30 + MeasureText(t, 14);
+            if (CheckCollisionPointRec(GetMousePosition(), Rectangle{ix - 2, row.y + 24, 26.f + tw, 24}))
+                partTip = std::string(ITEMS[in.item].name) + TextFormat("  (have %d, need %d)", have, in.n) + "\n" + ITEMS[in.item].desc;
+            ix += 30 + tw;
         }
         if (r.station) {
             const char* st = STATION_NAMES[r.station];
             DrawText(st, ix + 8, row.y + 30, 14, nearStation(r.station) ? Color{160, 230, 140, 255} : Color{240, 120, 100, 255});
+            if (CheckCollisionPointRec(GetMousePosition(), Rectangle{ix + 6, row.y + 26, MeasureText(st, 14) + 4.f, 20}))
+                partTip = std::string("Crafted at a ") + st + (nearStation(r.station) ? " (you're close enough)" : " - stand within 3 tiles of one");
         }
         if (CheckCollisionPointRec(GetMousePosition(), row)) hoverTip = std::string(ITEMS[r.out].name) + "\n" + ITEMS[r.out].desc;
+        if (!partTip.empty()) hoverTip = partTip;
         if (button(Rectangle{row.x + row.width - 90, row.y + 10, 80, 32}, "Craft", ok)) {
             int times = IsKeyDown(KEY_LEFT_SHIFT) ? 5 : 1;
             for (int t = 0; t < times; t++) if (!craft(r)) break;

@@ -1,0 +1,6 @@
+build/
+compile_commands.json
+*.sav
+*.sav.tmp
+*.png
+.DS_Store

@@ -66,6 +66,8 @@ static std::string itemTooltip(const Stack& s) {
     std::string t = d.name;
     if (d.food > 0) t += TextFormat("  (food %d", (int)d.food) + std::string(d.drink > 0 ? TextFormat(", water %d)", (int)d.drink) : ")");
     if (d.spoilDays > 0) t += TextFormat("  fresh %d%%", (int)(s.fresh * 100));
+    if (s.id == I_COMPOST) t += TextFormat("  quality %d%%", (int)(s.fresh * 100));
+    if (s.id == I_SCION) t += "\nVariety: " + geneDesc((int)s.fresh);
     t += "\n";
     t += d.desc;
     return t;
@@ -230,9 +232,15 @@ static const char* contInfo(const Container& c) {
         case C_CHEST: return (!indoor && rain) ? "Chest - DAMP! Food molds fast outdoors in rain. Move it indoors." : "Chest - general storage.";
         case C_GRANARY: return "Granary - dry storage, food keeps ~3x longer.";
         case C_CELLAR: return "Root cellar - cool storage, food keeps ~4x longer.";
-        case C_FRIDGE: return g->powered ? "Cold store - powered. Food barely spoils." : "Cold store - NO POWER. Food spoils normally!";
+        case C_FRIDGE: return poweredAt(c.x, c.y) ? "Cold store - powered. Food barely spoils." : "Cold store - NO POWER (needs a charged battery within 8 tiles). Food spoils normally!";
         case C_TROUGH: return "Feed trough - hay, wheat, cabbage for herbivores; meat for dogs.";
-        case C_COMPOST: return "Compost bin - manure, leaves and moldy food become compost.";
+        case C_COMPOST: {
+            int items = 0;
+            float r = compostRatio(c, &items);
+            if (items == 0) return "Compost bin - mix browns (leaves, hay, fiber, sticks) with greens (manure, rotten food).";
+            const char* advice = r > 40 ? "too much carbon - add manure or food scraps" : r < 20 ? "too much nitrogen - add leaves, hay or fiber" : "well balanced";
+            return TextFormat("Compost bin - C:N %.0f:1, %s (quality %d%%). Ideal ~30:1.", r, advice, (int)(compostQuality(r) * 100));
+        }
         case C_BIOGAS: return "Biogas digester - manure makes power and compost.";
     }
     return "";
@@ -345,7 +353,7 @@ static void workerPanel() {
     Ent* e = entById(g->openWorker);
     if (!e) { closePanel(); return; }
     int sw = GetScreenWidth(), sh = GetScreenHeight();
-    Rectangle r{sw / 2.f - 300, sh / 2.f - 250, 600, 500};
+    Rectangle r{sw / 2.f - 300, sh / 2.f - 310, 600, 620};
     panelBox(r, e->name.c_str());
     float y = r.y + 56;
     bar(r.x + 16, y, 270, 24, e->hp / e->maxhp, Color{200, 60, 60, 255}, "Health"); y += 30;
@@ -359,6 +367,18 @@ static void workerPanel() {
     int food = 0;
     for (int id : {I_STEW, I_COOKEDMEAT, I_BREAD, I_JERKY, I_EGG, I_MILK, I_CABBAGE, I_POTATO, I_BERRIES, I_BEANS, I_WHEAT}) food += storageCount(id);
     DrawText(TextFormat("Food in storage: %d items", food), r.x + 16, y, 18, food > 10 ? Color{160, 230, 140, 255} : Color{240, 120, 100, 255}); y += 40;
+    {
+        float b = farmBeauty();
+        DrawText(TextFormat("Working at %d%% pace (mood %d, farm beauty %d)", (int)std::round(workRate(*e) * 100), (int)e->mood, (int)b), r.x + 16, y - 12, 16,
+                 b >= 0 ? Color{170, 230, 150, 255} : Color{240, 140, 110, 255});
+        y += 14;
+    }
+    {
+        int v = dietVariety(*e);
+        DrawText(TextFormat("Diet variety: %d foods lately %s", v, v >= 6 ? "(delighted)" : v <= 2 ? "(sick of the same meal)" : ""), r.x + 16, y + 2, 16,
+                 v >= 4 ? Color{170, 230, 150, 255} : Color{240, 180, 110, 255});
+        y += 24;
+    }
     DrawText("Job:", r.x + 16, y, 20, TEXT); y += 28;
     static const char* desc[J_COUNT] = {
         "Wanders near the base.",
@@ -366,14 +386,17 @@ static void workerPanel() {
         "Fells trees near buildings first (firebreak), replants saplings further out.",
         "Fills troughs, shears, milks, gathers eggs and manure, makes hay.",
         "Cooks meat, bakes bread and makes stew at your campfire.",
-        "Patrols and fights wolves and raiders."};
+        "Patrols and fights wolves and raiders.",
+        "Walks the irrigation lines and patches anything coyotes chewed.",
+        "Works your mine and surfaces with stone and ore for storage.",
+        "Fishes from the nearest bank and brings the catch to storage."};
     for (int j = 0; j < J_COUNT; j++) {
         Rectangle b{r.x + 16 + (j % 3) * 190, y + (j / 3) * 46, 180, 40};
         if (button(b, JOB_NAMES[j], true)) e->job = (uint8_t)j;
         if (e->job == j) DrawRectangleLinesEx(b, 3, Color{255, 210, 120, 255});
         if (CheckCollisionPointRec(GetMousePosition(), b)) hoverTip = desc[j];
     }
-    DrawText(desc[e->job], r.x + 16, y + 100, 16, DIM);
+    DrawText(desc[e->job], r.x + 16, y + 146, 16, DIM);
     if (button(Rectangle{r.x + r.width - 140, r.y + r.height - 54, 124, 40}, "Dismiss")) {
         logMsg(e->name + " leaves your farm.", ORANGE);
         e->alive = false;
@@ -415,9 +438,15 @@ static void goalsPanel() {
     int crops = 0, gh = 0, tilled = 0;
     for (int i = 0; i < WW * WH; i++) { if (g->crops[i].type && !g->crops[i].dead) { crops++; if (g->ground[i] == G_GREENHOUSE) gh++; } if (g->ground[i] == G_TILLED || g->ground[i] == G_GREENHOUSE) tilled++; }
     DrawText(TextFormat("Fields: %d tiles, %d growing (%d under glass)", tilled, crops, gh), lx, ly, 16, TEXT); ly += 24;
-    DrawText(TextFormat("Power: %.0fW made, %.0fW used", g->powerGen, g->powerUse), lx, ly, 18, TEXT); ly += 24;
-    if (g->powerCap > 0) { DrawText(TextFormat("Battery: %d%%", (int)(100 * g->powerStored / g->powerCap)), lx, ly, 18, TEXT); ly += 24; }
+    DrawText(TextFormat("Power: +%.2f kW made, -%.2f kW load", g->powerGen, g->powerUse), lx, ly, 18, TEXT); ly += 24;
+    if (g->powerCap > 0) { DrawText(TextFormat("Batteries: %.1f / %.0f kWh", g->powerStored, g->powerCap), lx, ly, 18, TEXT); ly += 24; }
     ly += 8;
+    {
+        float b = farmBeauty();
+        int pct = (int)std::round(100 * (1.f + clampf(b, -20, 60) / 150.f));
+        DrawText(TextFormat("Farm beauty: %d  (workers at %d%% pace)", (int)b, pct), lx, ly, 18, b >= 0 ? Color{170, 230, 150, 255} : Color{240, 140, 110, 255});
+        ly += 24;
+    }
     DrawText(TextFormat("Livestock lost: %d", g->stats.livestockLost), lx, ly, 18, g->stats.livestockLost ? Color{240, 140, 110, 255} : TEXT); ly += 24;
     DrawText(TextFormat("Crops lost: %d", g->stats.cropsLost), lx, ly, 18, g->stats.cropsLost ? Color{240, 140, 110, 255} : TEXT); ly += 24;
     DrawText(TextFormat("Nights survived: %d", g->stats.nightsSurvived), lx, ly, 18, TEXT); ly += 24;
@@ -434,7 +463,7 @@ static Color groundColor(int i) {
     uint8_t gr = g->ground[i];
     uint8_t o = g->tiles[i].obj;
     if (o && OBJS[o].structure) return Color{200, 140, 80, 255};
-    if (o == O_OAK || o == O_PINE || o == O_BIRCH) return g->snowCover > 0.5f ? Color{120, 140, 130, 255} : Color{40, 100, 50, 255};
+    if (isTreeObj(o)) return g->snowCover > 0.5f ? Color{120, 140, 130, 255} : Color{40, 100, 50, 255};
     if (g->fire[i] > 0) return Color{255, 120, 40, 255};
     switch (gr) {
         case G_DEEP: return Color{36, 70, 130, 255};
@@ -497,17 +526,60 @@ static std::string tileTip(int tx, int ty) {
         s += OBJS[t.obj].name;
         if (t.obj == O_BUSH) s += t.var >= 4 ? " (picked)" : " (berries)";
         if (t.obj == O_SAPLING) s += TextFormat(" (grows in %d days)", std::max(0, 6 - (int)t.timer));
+        if (g->fruitGene[i] >= 0) s += "\n" + geneDesc(g->fruitGene[i]);
+        if (isFruitPlant(t.obj)) s += g->fruitState[i] == 1 ? "\nRIPE - click to pick" : g->fruitState[i] == 2 ? "\nPicked this year" : "\nNot ripe yet";
+        if (isFruitTree(t.obj)) s += "\nShears: cut a scion to graft this variety";
+        if (t.var & VAR_GUARD && (isTreeObj(t.obj) || t.obj == O_SAPLING)) s += "\nWire guard: safe from porcupines and woodcutters";
+        if (t.obj == O_BEEHIVE) s += (t.var & VAR_BEES) ? TextFormat("\nBees at home - honey %d%% (right-click to collect)\nPollinating within 10 tiles: more seeds and fruit", (int)(std::min(1.f, t.timer) * 100)) : "\nEmpty - a swarm will come once plenty is flowering nearby";
+        if (t.obj == O_MINE) s += g->ground[i] == G_STONE ? "\nRich rock - assign Miners" : "\nPoor ground - little ore here";
         if (t.cont >= 0) {
             int n = 0;
             for (auto& st : g->conts[t.cont].slots) if (st.id) n += st.n;
             s += TextFormat(" - %d items", n);
         }
-        if (t.obj == O_WHEEL || t.obj == O_SOLAR || t.obj == O_BIOGAS) s += TextFormat("\nGrid: %.0fW made / %.0fW used", g->powerGen, g->powerUse);
+        if (t.obj == O_SPRINKLER || t.obj == O_DRIP || t.obj == O_PUMP || t.obj == O_WELL) {
+            float sup, draw, pr;
+            if (lineBroken(t)) s += "\nBROKEN - chewed by coyotes, leaking pressure. Right-click to repair.";
+            else if (t.obj == O_SPRINKLER || t.obj == O_DRIP) {
+                s += (t.var & VAR_TIMER) ? std::string("\nTimer: ") + timerName((int)t.timer) + " (right-click to change)"
+                                         : std::string((int)t.timer == 4 ? "\nValve closed" : "\nRuns constantly") + " - fit an irrigation timer to schedule";
+                if (!waterNetInfo(tx, ty, sup, draw, pr)) s += "\nNO WATER: pipe it to a well or pump within 8 tiles";
+                else {
+                    s += TextFormat("\nLine pressure %.1f bar (supply %.1f, in use %.1f), needs %.1f", pr, sup, draw, waterMinPressure(t.obj));
+                    if (irrigating(tx, ty)) s += "\nWatering now";
+                    else if (timerActive((int)t.timer) && pr < waterMinPressure(t.obj)) s += "\nLOW PRESSURE - add a pump or remove devices";
+                    else s += "\nWaiting for its timer";
+                }
+            } else if (waterNetInfo(tx, ty, sup, draw, pr)) {
+                s += TextFormat("\nPipe network: %.1f bar supply, %.1f in use, %.1f left", sup, draw, pr);
+                if (t.obj == O_PUMP && !poweredAt(tx, ty) && draw > 0) s += "\nPUMP HAS NO POWER - wire it to a charged battery";
+            }
+        }
+        if (isPowerObj(t.obj)) {
+            float f = powerFlowAt(tx, ty);
+            if (t.obj == O_BATTERY) s += TextFormat("\nCharge %.1f / 10 kWh", t.timer);
+            else if (f > 0) s += TextFormat("\nProducing %.2f kW", f);
+            else if (f < 0) s += TextFormat("\nDrawing %.2f kW", -f);
+            else s += t.obj == O_SOLAR ? "\nNo sun - producing nothing" : (t.obj == O_LAMP || t.obj == O_HEATER ? "\nIdle" : "\nProducing nothing");
+            float gen, load, st, cap;
+            if (powerNetInfo(tx, ty, gen, load, st, cap)) {
+                s += TextFormat("\nNetwork: +%.2f / -%.2f kW, %.1f/%.0f kWh", gen, load, st, cap);
+                float net = gen - load;
+                if (net < -0.001f) s += TextFormat(" (empty in %.0fh)", st / -net);
+                else if (net > 0.001f && st < cap) s += TextFormat(" (full in %.0fh)", (cap - st) / net);
+            } else s += "\nNOT WIRED: build a battery bank within 8 tiles";
+        }
         if (OBJS[t.obj].structure) s += "\n(shift+click to pick up)";
         s += "\n";
     }
-    if (gr == G_TILLED || gr == G_GREENHOUSE) s += TextFormat("%s - moisture %d%%, fertility %d%%\n", gr == G_GREENHOUSE ? "Greenhouse soil" : "Tilled soil", (int)(g->moist[i] * 100), (int)(g->fert[i] * 100));
+    if (gr == G_TILLED || gr == G_GREENHOUSE) {
+        s += TextFormat("%s - moisture %d%%\n", gr == G_GREENHOUSE ? "Greenhouse soil" : "Tilled soil", (int)(g->moist[i] * 100));
+        s += soilAdvice(i) + "\n";
+        if (c.type && c.manure) s += "Green manure - will be hoed under\n";
+        if (c.type) s += "Hoe: plough it under\n";
+    }
     if (g->indoor[i] && !t.obj) s += "Indoors\n";
+    if (g->litter[i] > 0.05f) s += TextFormat("Poultry manure on the surface (%d%%) - hoe it in to feed the soil\n", (int)(g->litter[i] * 100));
     return s;
 }
 
@@ -547,8 +619,9 @@ static void hud() {
     int hh = (int)(g->tod * 24), mm = (int)(g->tod * 24 * 60) % 60;
     static const char* WN[] = {"Clear", "Cloudy", "Rain", "Thunderstorm", "Snow", "BLIZZARD", "Fog"};
     Color sc[4] = {Color{150, 230, 130, 255}, Color{255, 220, 90, 255}, Color{230, 140, 60, 255}, Color{170, 210, 255, 255}};
-    DrawText(TextFormat("%s, Day %d", SEASON_NAMES[g->season()], g->dayOfSeason() + 1), cr.x + 12, cr.y + 10, 22, sc[g->season()]);
-    DrawText(TextFormat("Year %d   %02d:%02d", g->year(), hh, mm / 10 * 10), cr.x + 12, cr.y + 38, 18, TEXT);
+    (void)sc;
+    DrawText(TextFormat("Day %d", g->day + 1), cr.x + 12, cr.y + 10, 22, Color{150, 230, 130, 255});
+    DrawText(TextFormat("Week %d   %02d:%02d", g->week(), hh, mm / 10 * 10), cr.x + 12, cr.y + 38, 18, TEXT);
     DrawText(TextFormat("%s  %d C  (feels %d C)", WN[g->weather], (int)std::round(airTemp()), (int)std::round(feels)), cr.x + 12, cr.y + 62, 18, TEXT);
     std::string alerts;
     if (g->drought) alerts += "DROUGHT  ";
@@ -558,8 +631,8 @@ static void hud() {
     for (auto& e : g->ents) if (e.alive && e.kind == E_RAIDER && e.state >= 1) { alerts += "RAID!"; break; }
     DrawText(alerts.c_str(), cr.x + 12, cr.y + 86, 18, Color{255, 110, 80, 255});
     if (g->powerGen > 0 || g->powerUse > 0)
-        DrawText(TextFormat("Power %.0fW / %.0fW%s", g->powerGen, g->powerUse, g->powerCap > 0 ? TextFormat("  batt %d%%", (int)(100 * g->powerStored / g->powerCap)) : ""), cr.x + 12, cr.y + 108, 16,
-                 g->powered || g->powerUse == 0 ? Color{140, 230, 255, 255} : Color{255, 120, 90, 255});
+        DrawText(TextFormat("Power +%.1f / -%.1f kW  %.1f/%.0f kWh", g->powerGen, g->powerUse, g->powerStored, g->powerCap), cr.x + 12, cr.y + 108, 16,
+                 g->powerCap > 0 && (g->powerStored > 0.01f || g->powerGen >= g->powerUse) ? Color{140, 230, 255, 255} : Color{255, 120, 90, 255});
 
     // minimap
     minimapTimer -= GetFrameTime();
@@ -639,7 +712,8 @@ static void hud() {
 
 static void helpPanel() {
     int sw = GetScreenWidth(), sh = GetScreenHeight();
-    Rectangle r{sw / 2.f - 520, sh / 2.f - 350, 1040, 700};
+    float hh = std::min(890.f, sh - 40.f);
+    Rectangle r{sw / 2.f - 580, sh / 2.f - hh / 2, 1160, hh};
     panelBox(r, "How to survive");
     const char* lines =
         "WASD move  -  Shift sprint  -  1-0 / mouse wheel select hotbar\n"
@@ -647,30 +721,59 @@ static void helpPanel() {
         "Right click: interact - open storage, eat/drink, equip clothes, tame/feed animals, trade, sleep\n"
         "Shift + left click on a building picks it back up.   F5 save   F9 load   +/- zoom\n"
         "\n"
-        "COLD KILLS. Night and winter are freezing. Stay near fires, build enclosed rooms (indoors is warmer),\n"
-        "and wear clothes: fur coats from hides, wool clothing from sheared sheep on a loom.\n"
+        "WEATHER. It's always growing season, but nights are cool and storms soak you. Fires, a roof and\n"
+        "clothes (fur coats from hides, wool from sheared sheep on a loom) keep you warm.\n"
         "\n"
         "FOOD ROTS. Raw food molds in your pack. Granaries and root cellars slow it; a powered cold store\n"
         "nearly stops it. Chests left outdoors in the rain get damp and mold fast. Mold spreads.\n"
         "\n"
-        "FARMING. Till, plant, water. Frost in late autumn kills crops still in the ground, so harvest early.\n"
-        "Cabbage is frost-hardy. Harvests drain the soil. Manure, compost, or beans (rotation) restore it.\n"
+        "FARMING. Till, plant, water. Harvests drain the soil; manure, compost, or beans (rotation) restore it.\n"
+        "Trees mature in a week and fruit every week after.\n"
         "No pesticides: ponds bring frogs, leaf piles bring spiders, and ducks and fowl eat insects.\n"
         "\n"
         "ANIMALS. Hold food an animal likes to calm it, then right-click to tame. Wolves hunt livestock at\n"
-        "night. Guard dogs, fences and fire keep them off. Livestock need hay in troughs during winter.\n"
+        "night. Guard dogs, fences and fire keep them off. Penned livestock need hay in troughs.\n"
         "\n"
         "TRIBES. Villages with banners trade (look for the $). Raider camps with skulls attack once your\n"
         "farm grows. Build roads to a trading village plus a trading post for better prices.\n"
         "Recruit workers there. They need an indoor bed, food in storage, and water (a well).\n"
         "\n"
-        "DISASTERS. Lightning starts wildfires in dry summers. Trees near buildings let fire spread, so keep\n"
-        "a firebreak. Spring floods hit riverbanks unless you dam the river, but a dam's reservoir drowns\n"
-        "the low land upstream for good. Choose where to dam. Blizzards, droughts, heatwaves.\n"
+        "DISASTERS. Lightning starts wildfires in dry spells. Trees near buildings let fire spread, so keep\n"
+        "a firebreak. Big storms flood riverbanks unless you dam the river, but a dam's reservoir drowns\n"
+        "the low land upstream for good. Choose where to dam. Droughts, heatwaves, insect swarms.\n"
         "\n"
-        "GO MODERN. Water wheels next to a dam and solar panels make power. Batteries store it. Power runs\n"
-        "lamps, heaters, sprinklers and cold stores. Biogas turns manure into power and compost.";
-    DrawText(lines, r.x + 20, r.y + 56, 17, TEXT);
+        "GO MODERN. Water wheels (next to a dam), solar panels and biogas charge battery banks (10 kWh each).\n"
+        "Lamps, heaters, sprinklers and cold stores draw from the bank. Everything must be within 8 tiles of a\n"
+        "bank, and nearby banks link up. Solar makes nothing at night and little in clouds, so size your batteries.\n"
+        "IRRIGATION. Sprinklers and drip lines must be piped to a well (1.5 bar) or an electric pump (4.5 bar)\n"
+        "within 8 tiles. Each device uses pressure, and a sprinkler needs 2 bar left to spray. Right-click a\n"
+        "device to set its timer. Drip lines can water saplings and trees, and wet ground resists wildfire.\n"
+        "Fields near rivers stay damp; farther out you need wells or pumps. Coyotes chew lines at night, and a\n"
+        "break sprays water and starves the line. Right-click to repair it, or hire a Repairer.\n"
+        "COMPOST balances browns (leaves, hay) and greens (manure, rot) near 30:1. Piles draw pest-eating\n"
+        "insects and feed poultry larvae. Leaf fall enriches soil under oaks and birches. Spear porcupines:\n"
+        "they ring-bark deciduous trees and kill them.\n"
+        "BEAUTY. Native trees (maple, mountain ash, aspen, serviceberry), ponds, wildflowers and a pump-fed\n"
+        "waterfall make workers happier and faster. Stumps, ash, manure and dead crops do the opposite.\n"
+        "ORCHARDS. Apple seeds give random varieties. Cut a scion (shears) from a tree you love and use it on a\n"
+        "sapling to graft. Varied meals keep workers happy. Fish with a rod: cast, wait for the !, click fast.\n"
+        "SOIL. Crops drain nitrogen, phosphorus and potassium; yield follows the scarcest. Hoe green manures under:\n"
+        "beans (N), buckwheat (P, K), mustard (pests). Add compost, manure or wood ash. Hover a field to read it.\n"
+        "CHICKENS. Free-range birds eat unfenced crops. Pen them on a patch and their droppings build up -\n"
+        "move them on, hoe the manure in, and plant into rich soil.\n"
+        "BEES. A hive draws a wild swarm when enough is flowering. Bees raise seed and fruit yields nearby, make\n"
+        "honey, and spread your wildflowers.\n"
+        "IRON & SILICON. Smelt iron ore and refine quartz in a kiln. Mines in rocky ground plus Miners bring ore.";
+    static float scroll = 0;
+    float viewH = r.height - 60;
+    int linesN = 1;
+    for (const char* c = lines; *c; c++) linesN += *c == '\n';
+    float textH = linesN * 16.f;
+    scroll = clampf(scroll - GetMouseWheelMove() * 40, 0, std::max(0.f, textH - viewH));
+    BeginScissorMode((int)r.x + 4, (int)r.y + 44, (int)r.width - 8, (int)viewH);
+    DrawText(lines, r.x + 18, r.y + 46 - scroll, 15, TEXT);
+    EndScissorMode();
+    if (textH > viewH) DrawText("scroll for more", r.x + r.width - 140, r.y + r.height - 18, 14, DIM);
 }
 
 static void pausePanel() {
@@ -703,7 +806,7 @@ static void titleScreen() {
     int fs = 96;
     DrawText(t, sw / 2 - MeasureText(t, fs) / 2 + 5, sh / 4 + 5, fs, Color{0, 0, 0, 180});
     DrawText(t, sw / 2 - MeasureText(t, fs) / 2, sh / 4, fs, Color{255, 200, 120, 255});
-    const char* sub = "From nothing to a self-sustaining modern farm. Survive the seasons.";
+    const char* sub = "From nothing to a self-sustaining modern farm, in an endless growing season.";
     DrawText(sub, sw / 2 - MeasureText(sub, 22) / 2, sh / 4 + 110, 22, TEXT);
     float y = sh / 2.f + 20;
     Rectangle b{sw / 2.f - 160, y, 320, 50};

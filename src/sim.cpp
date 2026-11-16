@@ -2,6 +2,7 @@
 // fire, power, natural disasters, tribes and goals.
 #include "game.h"
 #include <algorithm>
+#include <functional>
 
 // ---------------------------------------------------------------- log & fx
 bool g_echoLog = false;
@@ -81,7 +82,7 @@ int storageCount(int id) {
 static float storePreference(uint8_t kind, int id) {
     bool food = ITEMS[id].spoilDays > 0;
     switch (kind) {
-        case C_FRIDGE: return food ? (g->powered ? 4.f : 0.5f) : 0.2f;
+        case C_FRIDGE: return food ? 4.f : 0.2f;
         case C_CELLAR: return food ? 3.f : 0.5f;
         case C_GRANARY: return food ? 2.5f : 0.6f;
         case C_CHEST: return food ? 1.f : 2.f;
@@ -139,11 +140,16 @@ bool takeFromStorage(int id, int count, float nx, float ny, float* freshOut) {
 }
 
 // ---------------------------------------------------------------- climate
-float sunLevel() {
-    // sunrise ~0.25, sunset ~0.8; winter days shorter
+static void sunTimes(float& rise, float& set) {
+    // winter days are short, summer days long
     int s = g->season();
-    float rise = s == 3 ? 0.30f : (s == 1 ? 0.22f : 0.26f);
-    float set = s == 3 ? 0.74f : (s == 1 ? 0.84f : 0.79f);
+    rise = s == 3 ? 0.30f : (s == 1 ? 0.22f : 0.26f);
+    set = s == 3 ? 0.74f : (s == 1 ? 0.84f : 0.79f);
+}
+
+float sunLevel() {
+    float rise, set;
+    sunTimes(rise, set);
     float t = g->tod;
     if (t < rise - 0.04f || t > set + 0.04f) return 0;
     if (t < rise + 0.04f) return (t - (rise - 0.04f)) / 0.08f;
@@ -152,12 +158,9 @@ float sunLevel() {
 }
 
 static float tempAtTime(int day, float tod, float offset) {
-    static const float base[4] = {12, 24, 13, -8};
-    int s = (day / DAYS_PER_SEASON) % 4;
-    float f = ((day % DAYS_PER_SEASON) + tod) / DAYS_PER_SEASON;
-    f = f * f * (3 - 2 * f);
-    float t = base[s] + (base[(s + 1) % 4] - base[s]) * f * 0.7f;
-    t -= std::cos((tod - 0.12f) * 6.2832f) * 6.f;
+    (void)day;
+    float t = 21.f;                                      // a mild, endless growing season
+    t -= std::cos((tod - 0.12f) * 6.2832f) * 5.f;      // cool nights, warm afternoons
     return t + offset;
 }
 
@@ -179,7 +182,7 @@ float tempAt(int x, int y) {
     float t = airTemp();
     if (!inb(x, y)) return t;
     if (g->indoor[IDX(x, y)]) t += 7;
-    if (g->ground[IDX(x, y)] == G_GREENHOUSE) t += 16;
+    if (g->ground[IDX(x, y)] == G_GREENHOUSE) t += 5;
     float bonus = 0;
     for (int yy = y - 5; yy <= y + 5; yy++)
         for (int xx = x - 5; xx <= x + 5; xx++) {
@@ -187,7 +190,7 @@ float tempAt(int x, int y) {
             uint8_t o = g->tiles[IDX(xx, yy)].obj;
             float d = dist(x, y, xx, yy);
             if (o == O_CAMPFIRE || o == O_BONFIRE) bonus = std::max(bonus, 20.f * clampf(1 - d / 4.5f, 0, 1));
-            else if (o == O_HEATER && g->powered) bonus = std::max(bonus, (g->indoor[IDX(xx, yy)] ? 26.f : 14.f) * clampf(1 - d / 6.f, 0, 1));
+            else if (o == O_HEATER && poweredAt(xx, yy)) bonus = std::max(bonus, (g->indoor[IDX(xx, yy)] ? 26.f : 14.f) * clampf(1 - d / 6.f, 0, 1));
             else if (o == O_KILN) bonus = std::max(bonus, 10.f * clampf(1 - d / 3.f, 0, 1));
         }
     if (g->fire[IDX(x, y)] > 0) bonus += 30;
@@ -200,10 +203,8 @@ static void pickWeather() {
     int s = g->season();
     float r = rnd();
     uint8_t w = WX_CLEAR;
-    if (s == 0) w = r < 0.35f ? WX_CLEAR : r < 0.6f ? WX_CLOUDY : r < 0.88f ? WX_RAIN : r < 0.94f ? WX_STORM : WX_FOG;
-    else if (s == 1) w = r < 0.55f ? WX_CLEAR : r < 0.72f ? WX_CLOUDY : r < 0.85f ? WX_RAIN : WX_STORM;
-    else if (s == 2) w = r < 0.3f ? WX_CLEAR : r < 0.58f ? WX_CLOUDY : r < 0.86f ? WX_RAIN : WX_FOG;
-    else w = r < 0.3f ? WX_CLEAR : r < 0.6f ? WX_CLOUDY : r < 0.95f ? WX_SNOW : WX_BLIZZARD;
+    (void)s;
+    w = r < 0.45f ? WX_CLEAR : r < 0.68f ? WX_CLOUDY : r < 0.89f ? WX_RAIN : r < 0.96f ? WX_STORM : WX_FOG;
     if (g->drought && (w == WX_RAIN || w == WX_CLOUDY) && rnd() < 0.8f) w = WX_CLEAR;
     if (g->heatwave && w != WX_STORM) w = WX_CLEAR;
     if (airTemp() < 0 && w == WX_RAIN) w = WX_SNOW;
@@ -257,7 +258,7 @@ static void updateFire(float dt) {
         else f = std::min(1.f, f + 0.25f * dt);
         if (fuel && f > 0.5f) {
             t.timer += dt;
-            float burnTime = (t.obj == O_OAK || t.obj == O_PINE || t.obj == O_BIRCH) ? 9.f : (t.obj && OBJS[t.obj].structure ? 7.f : 3.f);
+            float burnTime = isTreeObj(t.obj) ? 9.f : (t.obj && OBJS[t.obj].structure ? 7.f : 3.f);
             if (t.timer > burnTime) {
                 if (t.obj) {
                     bool st = OBJS[t.obj].structure;
@@ -277,8 +278,9 @@ static void updateFire(float dt) {
                     int j = IDX(nx, ny);
                     uint8_t o = g->tiles[j].obj;
                     float chance = 0.25f * dry;
-                    if (o == O_OAK || o == O_PINE || o == O_BIRCH) chance *= 1.6f;
+                    if (isTreeObj(o)) chance *= 1.6f;
                     if (o == O_PINE) chance *= 1.3f;
+                    if (g->moist[j] > 0.6f) chance *= 0.3f;   // irrigated ground resists fire
                     if (g->fire[j] <= 0 && tileFlammable(j) && rnd() < chance) { g->fire[j] = 0.15f; spawned.push_back(j); }
                 }
             }
@@ -296,7 +298,82 @@ static void updateFire(float dt) {
     g->fireTiles.swap(next);
 }
 
+void warnStorageFull(const char* what) {
+    static float last = -1000;
+    if (g->totalTime - last < 60 && g->totalTime >= last) return;
+    last = g->totalTime;
+    logMsg(std::string("Storage is full - harvested ") + what + " is going to waste! Build more chests or a granary.", ORANGE);
+}
+
 // ---------------------------------------------------------------- crops
+// ---------------------------------------------------------------- soil N/P/K
+// What each crop takes out of the soil (N, P, K) per harvest. Legumes put nitrogen back.
+static const float CROP_NPK[CR_COUNT][3] = {
+    {0, 0, 0}, {0.2f, 0.1f, 0.08f}, {0.12f, 0.12f, 0.25f}, {0.2f, 0.08f, 0.12f}, {-0.3f, 0.05f, 0.05f},
+    {0.15f, 0.15f, 0.2f}, {0.18f, 0.1f, 0.2f}, {-0.2f, 0.04f, 0.05f}, {0.05f, 0.02f, 0.02f}, {0.05f, 0.03f, 0.03f}};
+
+void addNutrients(int i, float n, float p, float k) {
+    g->fert[i] = clampf(g->fert[i] + n, 0.02f, 1.4f);
+    g->phos[i] = clampf(g->phos[i] + p, 0.02f, 1.4f);
+    g->pota[i] = clampf(g->pota[i] + k, 0.02f, 1.4f);
+}
+
+float soilMin(int i) { return std::min(g->fert[i], std::min(g->phos[i], g->pota[i])); }
+
+// Liebig's law: yield is held back by whichever nutrient the crop needs that is scarcest.
+float soilFactor(int i, int crop) {
+    float f = 1.4f;
+    const float* need = CROP_NPK[crop];
+    if (need[0] > 0.04f) f = std::min(f, g->fert[i]);
+    if (need[1] > 0.04f) f = std::min(f, g->phos[i]);
+    if (need[2] > 0.04f) f = std::min(f, g->pota[i]);
+    return f;
+}
+
+std::string soilAdvice(int i) {
+    float n = g->fert[i], p = g->phos[i], k = g->pota[i];
+    std::string s = TextFormat("Soil N %d%%  P %d%%  K %d%%", (int)(n * 100), (int)(p * 100), (int)(k * 100));
+    if (n < 0.35f) s += "\nLow nitrogen: grow beans and hoe them under, or add manure/compost";
+    if (p < 0.35f) s += "\nLow phosphorus: grow buckwheat and hoe it under, or add compost";
+    if (k < 0.35f) s += "\nLow potassium: buckwheat, wood ash or compost";
+    return s;
+}
+
+void tillInLitter(int i) {
+    float l = g->litter[i];
+    if (l <= 0.01f) return;
+    addNutrients(i, 0.5f * l, 0.4f * l, 0.4f * l);   // poultry manure is rich in N, P and K
+    g->litter[i] = 0;
+}
+
+// Hoe a standing crop into the soil. Green manures feed this tile and its neighbours; anything else
+// adds a little organic matter and clears the plot.
+void plowUnder(int x, int y) {
+    int i = IDX(x, y);
+    Crop& c = g->crops[i];
+    if (!c.type) return;
+    float m = c.dead ? 0.3f : clampf(c.growth, 0.2f, 1.f);
+    float n = 0.04f, p = 0.02f, k = 0.02f, spread = 0;
+    bool green = !c.dead;
+    switch (c.type) {
+        case CR_BEANS: case CR_GREENBEAN: n = 0.3f; p = 0.03f; k = 0.05f; spread = 0.5f; break;      // fixed nitrogen
+        case CR_BUCKWHEAT: n = 0.05f; p = 0.28f; k = 0.22f; spread = 0.5f; break;                  // mined P and K
+        case CR_MUSTARD: n = 0.12f; p = 0.1f; k = 0.1f; spread = 0.5f; break;                      // scavenged nutrients
+        default: break;
+    }
+    if (!green) spread = 0;
+    addNutrients(i, n * m, p * m, k * m);
+    for (int yy = y - 1; yy <= y + 1; yy++)
+        for (int xx = x - 1; xx <= x + 1; xx++) {
+            if (!inb(xx, yy) || (xx == x && yy == y)) continue;
+            int j = IDX(xx, yy);
+            if (spread > 0 && (g->ground[j] == G_TILLED || g->ground[j] == G_GREENHOUSE)) addNutrients(j, n * m * spread, p * m * spread, k * m * spread);
+            if (c.type == CR_MUSTARD && green) g->crops[j].pest = std::max(0.f, g->crops[j].pest - 0.3f);   // biofumigation
+        }
+    burst(x + 0.5f, y + 0.5f, Color{110, 80, 50, 255}, 8);
+    c = Crop{};
+}
+
 void harvestCrop(int x, int y, bool byWorker, float wx, float wy) {
     int i = IDX(x, y);
     Crop& c = g->crops[i];
@@ -310,20 +387,26 @@ void harvestCrop(int x, int y, bool byWorker, float wx, float wy) {
         if (!byWorker) floatText(x + 0.5f, y, "Not ripe", LIGHTGRAY);
         return;
     }
-    float f = g->fert[i];
-    int n = std::max(1, (int)std::round(d.yield * (0.35f + f * 0.9f) * (1 - c.pest * 0.6f)));
+    float f = soilFactor(i, c.type);
+    float pollinators = (g->season() <= 1 && nearObj(x + 0.5f, y + 0.5f, O_FLOWERS, 4.5f)) ? 1.2f : 1.f;
+    int n = std::max(1, (int)std::round(d.yield * (0.35f + f * 0.9f) * (1 - c.pest * 0.6f) * pollinators));
     int seeds = c.type == CR_WHEAT ? 2 : 0;
     auto give = [&](int id, int cnt) {
         if (cnt <= 0 || !id) return;
-        if (byWorker) storeAnywhere(id, cnt, 1.f, wx, wy);
+        if (byWorker) { if (!storeAnywhere(id, cnt, 1.f, wx, wy)) warnStorageFull(ITEMS[id].name); }
         else addToPlayer(id, cnt);
         if (isFood(id)) g->stats.foodMade += ITEMS[id].food * cnt;
     };
+    if (beesNear(x, y)) {   // well-pollinated plants set more seed
+        if (c.type == CR_WHEAT) seeds += 2;
+        else if (d.seed != d.produce) give(d.seed, 2);
+        else n += 1;
+    }
     give(d.produce, n);
     give(d.extra, d.extraN);
     give(I_WHEATSEED, seeds);
     if (!byWorker) floatText(x + 0.5f, y, "+" + std::to_string(n) + " " + ITEMS[d.produce].name, Color{200, 255, 150, 255});
-    g->fert[i] = clampf(g->fert[i] - d.drain, 0.05f, 1.4f);
+    addNutrients(i, -CROP_NPK[c.type][0], -CROP_NPK[c.type][1], -CROP_NPK[c.type][2]);
     c = Crop{};
     burst(x + 0.5f, y + 0.5f, d.col, 6);
 }
@@ -342,9 +425,73 @@ static void computePredators() {
             uint8_t o = g->tiles[IDX(x, y)].obj;
             if (o == O_POND) addRadius(x, y, 7, 0.6f);
             else if (o == O_LEAFPILE) addRadius(x, y, 4, 0.5f);
+            else if (o == O_MTNASH) addRadius(x, y, 4, 0.2f);
+            else if (o == O_BIRDHOUSE) addRadius(x, y, 6, 0.35f);     // nesting songbirds feed chicks on caterpillars        // berry-eating birds also eat insects
+            else if (o == O_FLOWERS) addRadius(x, y, 3, 0.15f);      // hoverflies and parasitic wasps
+            else if (o == O_COMPOST && g->tiles[IDX(x, y)].cont >= 0) {   // wasps, spiders and beetles
+                int items = 0;
+                compostRatio(g->conts[g->tiles[IDX(x, y)].cont], &items);
+                if (items >= 2) addRadius(x, y, 5, 0.4f);
+            }
         }
     for (auto& e : g->ents)
         if (e.alive && e.tame && (e.kind == E_DUCK || e.kind == E_FOWL)) addRadius((int)e.x, (int)e.y, 5, 0.25f);
+}
+
+// ---------------------------------------------------------------- bees
+static int bloomNear(int x, int y, int R) {
+    int n = 0;
+    bool spring = g->season() == 0, summer = g->season() == 1;
+    for (int yy = y - R; yy <= y + R; yy++)
+        for (int xx = x - R; xx <= x + R; xx++) {
+            if (!inb(xx, yy)) continue;
+            int i = IDX(xx, yy);
+            uint8_t o = g->tiles[i].obj;
+            if (o == O_FLOWERS && (spring || summer)) n += 2;
+            else if ((isFruitTree(o) || o == O_SERVICEBERRY || o == O_MTNASH) && (spring || summer)) n += 2;
+            else if ((o == O_RASPBERRY || o == O_BLACKBERRY || o == O_BUSH) && (spring || summer)) n += 1;
+            else if (g->crops[i].type && !g->crops[i].dead && g->crops[i].growth > 0.4f && (spring || summer)) n += 1;
+        }
+    return n;
+}
+
+bool beesNear(int x, int y) {
+    for (int yy = y - 10; yy <= y + 10; yy++)
+        for (int xx = x - 10; xx <= x + 10; xx++)
+            if (inb(xx, yy) && g->tiles[IDX(xx, yy)].obj == O_BEEHIVE && (g->tiles[IDX(xx, yy)].var & VAR_BEES)) return true;
+    return false;
+}
+
+int collectHoney(int x, int y) {
+    Tile& t = g->tiles[IDX(x, y)];
+    if (t.obj != O_BEEHIVE || t.timer < 1) return 0;
+    int n = (int)t.timer * 2;
+    t.timer -= (int)t.timer;
+    return n;
+}
+
+static void dailyBees() {
+    int s = g->season();
+    for (int y = 0; y < WH; y++)
+        for (int x = 0; x < WW; x++) {
+            Tile& t = g->tiles[IDX(x, y)];
+            if (t.obj != O_BEEHIVE) continue;
+            int bloom = bloomNear(x, y, 8);
+            if (!(t.var & VAR_BEES) && (s == 0 || s == 1) && bloom >= 6 && rnd() < 0.5f) {
+                t.var |= VAR_BEES;
+                logMsg("A wild swarm of bees has moved into your hive!", Color{250, 210, 80, 255});
+            }
+            if (!(t.var & VAR_BEES)) continue;
+            if (s != 3) t.timer = std::min(5.f, t.timer + std::min(1.f, bloom / 20.f));   // honey flow follows the bloom
+            // pollinated wildflowers self-seed onto nearby grass
+            if (s <= 1)
+                for (int yy = y - 10; yy <= y + 10; yy++)
+                    for (int xx = x - 10; xx <= x + 10; xx++) {
+                        if (!inb(xx, yy) || g->tiles[IDX(xx, yy)].obj != O_FLOWERS || rnd() > 0.25f) continue;
+                        int nx = xx + rndi(-1, 1), ny = yy + rndi(-1, 1);
+                        if (inb(nx, ny) && !g->tiles[IDX(nx, ny)].obj && g->ground[IDX(nx, ny)] == G_GRASS && !g->crops[IDX(nx, ny)].type) placeObject(nx, ny, O_FLOWERS);
+                    }
+        }
 }
 
 static void dailyCrops() {
@@ -362,6 +509,11 @@ static void dailyCrops() {
                 for (int xx = x - 3; xx <= x + 3; xx++)
                     if (inb(xx, yy) && g->crops[IDX(xx, yy)].type == c.type) same++;
             float mono = same / 49.f;
+            bool mustardNear = false;
+            for (int yy = y - 1; yy <= y + 1 && !mustardNear; yy++)
+                for (int xx = x - 1; xx <= x + 1; xx++)
+                    if (inb(xx, yy) && g->crops[IDX(xx, yy)].type == CR_MUSTARD && !g->crops[IDX(xx, yy)].dead) { mustardNear = true; break; }
+            if (mustardNear) mono *= 0.3f;
             float gain = 0.07f + 0.2f * mono - predatorOf(x, y) * 0.45f;
             if (g->ground[i] == G_GREENHOUSE) gain *= 0.6f;
             c.pest = clampf(c.pest + gain, 0, 1);
@@ -378,15 +530,16 @@ static void updateCrops(float dtDays) {
         Crop& c = g->crops[i];
         if (!c.type || c.dead) continue;
         bool gh = g->ground[i] == G_GREENHOUSE;
-        float t = air + (gh ? 16.f : 0.f);
+        float t = air + (gh ? 5.f : 0.f);
         if (frost && !gh && !CROPS[c.type].hardy) { c.dead = true; killed++; continue; }
         if (c.growth >= 1.f) continue;
         float rate = 1.f / CROPS[c.type].days;
         float tf = t < 3 ? 0.f : (t < 11 ? 0.5f : (t > 34 ? 0.4f : 1.f));
+        if (c.type == CR_TOMATO && t < 15) tf *= 0.4f;   // tomatoes sulk in the cold
         if (CROPS[c.type].hardy && t >= 0 && t < 11) tf = 0.8f;
         float mf = g->moist[i] > 0.22f ? 1.f : 0.12f;
         float pf = c.pest > 0.6f ? 0.5f : 1.f;
-        c.growth = std::min(1.f, c.growth + rate * tf * mf * pf * dtDays);
+        c.growth = std::min(1.f, c.growth + rate * tf * mf * pf * (gh ? 1.25f : 1.f) * dtDays);   // greenhouses grow a bit faster
     }
     if (killed) {
         g->stats.cropsLost += killed;
@@ -423,7 +576,7 @@ static void updateSpoilage(float dtDays) {
             case C_CHEST: m *= 0.9f; if (!indoor && raining()) m *= 2.f; break;
             case C_GRANARY: m *= 0.33f; break;
             case C_CELLAR: m = 0.22f * 0.6f; break;
-            case C_FRIDGE: m = g->powered ? 0.04f : tf * 1.1f; break;
+            case C_FRIDGE: m = poweredAt(c.x, c.y) ? 0.04f : tf * 1.1f; break;
             case C_TROUGH: m *= indoor ? 1.f : (raining() ? 2.f : 1.2f); break;
             default: continue;
         }
@@ -433,93 +586,365 @@ static void updateSpoilage(float dtDays) {
 }
 
 // ---------------------------------------------------------------- compost & biogas
-static float biogasOutput = 0;
+// Carbon and nitrogen parts of compostable items. Browns (leaves, hay, fiber, sticks) are carbon-rich;
+// greens (manure, rotten food, vegetable scraps) are nitrogen-rich. A pile composts best near 30:1.
+bool compostParts(int id, float& c, float& n) {
+    n = 1;
+    switch (id) {
+        case I_STICK: c = 100; return true;
+        case I_LEAVES: c = 60; return true;
+        case I_HAY: case I_FIBER: c = 45; return true;
+        case I_MANURE: c = 15; return true;
+        case I_MOLDY: case I_BERRIES: case I_CABBAGE: case I_POTATO: case I_BEANS: case I_TOMATO: case I_SQUASH: case I_GREENBEANS:
+        case I_APPLE: case I_APPLE_SPITTER: case I_APPLE_PRIZE: case I_PEAR: case I_APRICOT: case I_GRAPES: case I_BLACKBERRY: case I_RASPBERRY: c = 15; return true;
+        default: return false;
+    }
+}
+
+float compostRatio(const Container& c, int* items) {
+    float sc = 0, sn = 0; int n = 0;
+    for (auto& s : c.slots) {
+        float pc, pn;
+        if (s.id && compostParts(s.id, pc, pn)) { sc += pc * s.n; sn += pn * s.n; n += s.n; }
+    }
+    if (items) *items = n;
+    return sn > 0 ? sc / sn : 0;
+}
+
+float compostQuality(float ratio) {
+    if (ratio <= 0) return 0;
+    return clampf(1.f - std::fabs(std::log(ratio / 30.f)) / std::log(4.f), 0.15f, 1.f);
+}
+
 static void updateProcessors(float dtDays) {
-    biogasOutput = 0;
     for (auto& c : g->conts) {
         if (!c.alive) continue;
-        if (c.kind == C_COMPOST || c.kind == C_BIOGAS) {
-            Tile& t = g->tiles[IDX(c.x, c.y)];
-            int inputs = countItem(c.slots.data(), (int)c.slots.size(), I_MANURE) + countItem(c.slots.data(), (int)c.slots.size(), I_LEAVES) +
-                         countItem(c.slots.data(), (int)c.slots.size(), I_MOLDY);
-            if (c.kind == C_BIOGAS && countItem(c.slots.data(), (int)c.slots.size(), I_MANURE) > 0) biogasOutput += 7.f;
-            if (inputs >= 2) {
-                t.timer += dtDays;
-                float need = c.kind == C_BIOGAS ? 0.12f : 0.2f;
-                if (t.timer >= need) {
-                    t.timer = 0;
-                    int took = 0;
-                    for (int id : {I_MANURE, I_MOLDY, I_LEAVES})
-                        while (took < 2 && takeItem(c.slots.data(), (int)c.slots.size(), id, 1)) took++;
-                    // finished compost goes to storage where farmers can find it
-                    if (!storeAnywhere(I_COMPOST, 1, 1, c.x, c.y)) addItem(c.slots.data(), (int)c.slots.size(), I_COMPOST, 1);
-                    g->stats.composted++;
-                }
+        Tile& t = g->tiles[IDX(c.x, c.y)];
+        int n = (int)c.slots.size();
+        if (c.kind == C_BIOGAS) {
+            if (countItem(c.slots.data(), n, I_MANURE) < 2) continue;
+            t.timer += dtDays;
+            if (t.timer < 0.12f) continue;
+            t.timer = 0;
+            takeItem(c.slots.data(), n, I_MANURE, 2);
+            if (!storeAnywhere(I_COMPOST, 1, 0.6f, c.x, c.y)) addItem(c.slots.data(), n, I_COMPOST, 1, 0.6f);   // digestate
+            g->stats.composted++;
+        } else if (c.kind == C_COMPOST) {
+            int items = 0;
+            float q = compostQuality(compostRatio(c, &items));
+            if (items < 3) continue;
+            t.timer += dtDays * (0.35f + 0.65f * q);   // a balanced pile heats up and works fast
+            if (t.timer < 0.2f) continue;
+            t.timer = 0;
+            // consume one brown and one green where possible, plus one more of whatever is most plentiful
+            int took = 0, brown = 0, green = 0;
+            for (auto& s : c.slots) {
+                float pc, pn;
+                if (!s.id || !compostParts(s.id, pc, pn)) continue;
+                if (pc >= 40) brown += s.n; else green += s.n;
             }
+            auto takeKind = [&](bool wantBrown) {
+                for (auto& s : c.slots) {
+                    float pc, pn;
+                    if (s.id && compostParts(s.id, pc, pn) && (pc >= 40) == wantBrown) { if (--s.n <= 0) s = Stack{}; took++; return true; }
+                }
+                return false;
+            };
+            takeKind(true); takeKind(false);
+            while (took < 3 && (takeKind(brown >= green) || takeKind(brown < green))) {}
+            if (!storeAnywhere(I_COMPOST, 1, q, c.x, c.y)) addItem(c.slots.data(), n, I_COMPOST, 1, q);
+            g->stats.composted++;
         }
     }
 }
 
 // ---------------------------------------------------------------- power
-static void updatePower(float dt) {
-    float gen = 0, use = 0, cap = 0;
-    int s = g->season();
-    float sun = sunLevel() * (s == 0 ? 0.9f : s == 1 ? 1.f : s == 2 ? 0.7f : 0.45f);
+// Sources charge battery banks; machines draw from them. Anything more than CABLE tiles from a
+// bank is unconnected and does nothing. Banks within CABLE tiles of each other share one network.
+// Units: kW for flow, kWh for storage (battery charge lives in the bank tile's timer).
+static const float CABLE = 8.f;
+static const float BATTERY_KWH = 10.f;
+
+struct PowerNet { float gen = 0, load = 0, cap = 0, stored = 0; std::vector<int> banks; std::vector<std::pair<int, float>> loads; };
+static std::vector<PowerNet> nets;
+static std::vector<int> linkOf, netOf;      // per tile: linked bank tile, network index
+static std::vector<uint8_t> running;        // per tile: machine has power this tick
+static std::vector<int> linked;              // tiles to reset next pass
+static bool anyBiogas = false;
+
+static bool isPowerSource(uint8_t o) { return o == O_SOLAR || o == O_WHEEL || o == O_BIOGAS; }
+static bool isPowerLoad(uint8_t o) { return o == O_LAMP || o == O_HEATER || o == O_PUMP || o == O_FRIDGE; }
+static std::vector<uint8_t> pumpWanted;   // per tile: a pump has active irrigation downstream
+bool isPowerObj(uint8_t o) { return isPowerSource(o) || isPowerLoad(o) || o == O_BATTERY; }
+
+float solarFactor() {
+    float rise, set;
+    sunTimes(rise, set);
+    float t = g->tod;
+    if (t <= rise || t >= set) return 0;
+    float elev = std::sin(3.14159f * (t - rise) / (set - rise));   // low sun at dawn and dusk
+    static const float seasonF[4] = {0.85f, 1.f, 0.65f, 0.35f};    // winter sun is low and weak
+    float f = elev * seasonF[g->season()];
     switch (g->weather) {
-        case WX_CLOUDY: case WX_FOG: sun *= 0.5f; break;
-        case WX_RAIN: case WX_SNOW: sun *= 0.3f; break;
-        case WX_STORM: sun *= 0.2f; break;
-        case WX_BLIZZARD: sun *= 0.1f; break;
+        case WX_CLOUDY: case WX_FOG: f *= 0.45f; break;
+        case WX_RAIN: f *= 0.25f; break;
+        case WX_SNOW: f *= 0.2f; break;
+        case WX_STORM: f *= 0.15f; break;
+        case WX_BLIZZARD: f *= 0.05f; break;
         default: break;
     }
-    if (g->snowCover > 0.6f) sun *= 0.7f;
-    bool night = sunLevel() < 0.3f;
-    bool cold = airTemp() < 16;
-    for (int y = 0; y < WH; y++)
-        for (int x = 0; x < WW; x++) {
-            uint8_t o = g->tiles[IDX(x, y)].obj;
-            if (!o) continue;
-            switch (o) {
-                case O_WHEEL: {
-                    bool dam = false, water = false;
-                    for (int k = -1; k <= 1; k++) for (int j = -1; j <= 1; j++) {
-                        if (!inb(x + j, y + k)) continue;
-                        if (g->tiles[IDX(x + j, y + k)].obj == O_DAM) dam = true;
-                        if (g->river[IDX(x + j, y + k)] && isWater(x + j, y + k)) water = true;
-                    }
-                    if (dam && water) gen += airTemp() < -6 ? 3.f : 10.f;
-                    else if (water) gen += 2.f;
-                    break;
-                }
-                case O_SOLAR: gen += 6.f * sun; break;
-                case O_BATTERY: cap += 2000; break;
-                case O_LAMP: if (night) use += 1; break;
-                case O_HEATER: if (cold) use += 4; break;
-                case O_SPRINKLER: use += 1.5f; break;
-                case O_FRIDGE: use += 2; break;
-                default: break;
-            }
-        }
-    gen += biogasOutput;
-    g->powerGen = gen; g->powerUse = use; g->powerCap = cap;
-    float net = gen - use;
-    g->powerStored = clampf(g->powerStored + net * dt, 0, cap);
-    g->powered = use > 0 && (net >= 0 || g->powerStored > 0);
+    if (g->snowCover > 0.6f) f *= 0.6f;   // snow on the panels
+    return f;
 }
 
-static void updateSprinklers(float dt) {
-    if (!g->powered) return;
-    for (int y = 0; y < WH; y++)
-        for (int x = 0; x < WW; x++) {
-            if (g->tiles[IDX(x, y)].obj != O_SPRINKLER) continue;
-            for (int yy = y - 3; yy <= y + 3; yy++)
-                for (int xx = x - 3; xx <= x + 3; xx++)
-                    if (inb(xx, yy)) g->moist[IDX(xx, yy)] = std::min(1.f, g->moist[IDX(xx, yy)] + 0.05f * dt);
-            if (rnd() < dt * 4) {
-                float a = rndr(0, 6.283f);
-                g->parts.push_back({x + 0.5f, y + 0.4f, std::cos(a) * 2.f, std::sin(a) * 2.f - 1, 0.5f, 0.5f, Color{140, 200, 255, 200}, 1.5f, 3});
+// Instantaneous output (kW, positive) or demand (kW, negative) of a power object.
+float powerFlowAt(int x, int y) {
+    if (!inb(x, y)) return 0;
+    Tile& t = g->tiles[IDX(x, y)];
+    switch (t.obj) {
+        case O_SOLAR: return 0.4f * solarFactor();
+        case O_WHEEL: {
+            bool dam = false, water = false;
+            for (int k = -1; k <= 1; k++) for (int j = -1; j <= 1; j++) {
+                if (!inb(x + j, y + k)) continue;
+                if (g->tiles[IDX(x + j, y + k)].obj == O_DAM) dam = true;
+                if (isWater(x + j, y + k)) water = true;
             }
+            if (!water) return 0;
+            float f = dam ? 1.5f : 0.3f;
+            return airTemp() < -6 ? f * 0.3f : f;   // a frozen river barely turns the wheel
         }
+        case O_BIOGAS: {
+            if (t.cont < 0) return 0;
+            Container& c = g->conts[t.cont];
+            return countItem(c.slots.data(), (int)c.slots.size(), I_MANURE) > 0 ? 1.f : 0.f;
+        }
+        case O_LAMP: return sunLevel() < 0.3f ? -0.06f : 0.f;
+        case O_HEATER: return airTemp() < 16 ? -1.5f : 0.f;
+        case O_PUMP: return (!pumpWanted.empty() && pumpWanted[IDX(x, y)]) ? -0.4f : 0.f;
+        case O_FRIDGE: return -0.12f;
+        default: return 0;
+    }
+}
+
+static int findRoot(std::vector<int>& p, int a) { while (p[a] != a) a = p[a] = p[p[a]]; return a; }
+
+static void updatePower(float dt) {
+    if (linkOf.empty()) { linkOf.assign(WW * WH, -1); netOf.assign(WW * WH, -1); running.assign(WW * WH, 0); }
+    for (int i : linked) { linkOf[i] = -1; netOf[i] = -1; running[i] = 0; }
+    linked.clear();
+    nets.clear();
+    std::vector<int> banks, devices;
+    for (int i = 0; i < WW * WH; i++) {
+        uint8_t o = g->tiles[i].obj;
+        if (o == O_BATTERY) banks.push_back(i);
+        else if (o && isPowerObj(o)) devices.push_back(i);
+    }
+    // group banks into networks
+    std::vector<int> parent(banks.size());
+    for (size_t a = 0; a < banks.size(); a++) parent[a] = (int)a;
+    for (size_t a = 0; a < banks.size(); a++)
+        for (size_t b = a + 1; b < banks.size(); b++)
+            if (dist(banks[a] % WW, banks[a] / WW, banks[b] % WW, banks[b] / WW) <= CABLE) parent[findRoot(parent, (int)a)] = findRoot(parent, (int)b);
+    std::vector<int> rootNet(banks.size(), -1);
+    for (size_t a = 0; a < banks.size(); a++) {
+        int r = findRoot(parent, (int)a);
+        if (rootNet[r] < 0) { rootNet[r] = (int)nets.size(); nets.emplace_back(); }
+        PowerNet& n = nets[rootNet[r]];
+        n.banks.push_back(banks[a]);
+        n.cap += BATTERY_KWH;
+        n.stored += clampf(g->tiles[banks[a]].timer, 0, BATTERY_KWH);
+        netOf[banks[a]] = rootNet[r]; linkOf[banks[a]] = banks[a]; linked.push_back(banks[a]);
+    }
+    // wire each device to its nearest bank
+    anyBiogas = false;
+    for (int i : devices) {
+        int x = i % WW, y = i / WW, best = -1;
+        float bd = CABLE + 0.01f;
+        for (int b : banks) { float d = dist(x, y, b % WW, b / WW); if (d < bd) { bd = d; best = b; } }
+        if (best < 0) continue;
+        int n = netOf[best];
+        linkOf[i] = best; netOf[i] = n; linked.push_back(i);
+        float f = powerFlowAt(x, y);
+        if (f > 0) nets[n].gen += f;
+        else if (isPowerLoad(g->tiles[i].obj)) { nets[n].load -= f; nets[n].loads.push_back({i, -f}); }
+        if (g->tiles[i].obj == O_BIOGAS && f > 0) anyBiogas = true;
+    }
+    // charge / discharge
+    float hours = dt * 24.f / DAY_SECONDS;
+    g->powerGen = g->powerUse = g->powerStored = g->powerCap = 0;
+    g->powered = false;
+    // machines that matter most get power first when supply runs short
+    auto priority = [](int i) {
+        switch (g->tiles[i].obj) { case O_FRIDGE: return 0; case O_PUMP: return 1; case O_LAMP: return 2; default: return 3; }
+    };
+    for (auto& n : nets) {
+        float budget = n.gen + (hours > 0 ? n.stored / hours : 0);   // kW available this tick
+        std::sort(n.loads.begin(), n.loads.end(), [&](auto& a, auto& b) { return priority(a.first) < priority(b.first); });
+        float used = 0;
+        for (auto& [tile, draw] : n.loads)
+            if (draw > 0 && used + draw <= budget + 1e-6f) { used += draw; running[tile] = 1; }
+        // idle machines (lamp by day, heater when warm) are "on" as long as the network has anything
+        bool live = budget > 1e-6f;
+        for (int i : linked)
+            if (netOf[i] >= 0 && &nets[netOf[i]] == &n && isPowerLoad(g->tiles[i].obj) && powerFlowAt(i % WW, i / WW) == 0) running[i] = live;
+        n.stored = clampf(n.stored + (n.gen - used) * hours, 0, n.cap);
+        for (int b : n.banks) g->tiles[b].timer = n.stored / n.banks.size();
+        g->powerGen += n.gen; g->powerUse += n.load; g->powerStored += n.stored; g->powerCap += n.cap;
+        g->powered = g->powered || used > 0;
+    }
+}
+
+bool poweredAt(int x, int y) {
+    if (!inb(x, y) || running.empty()) return false;
+    return running[IDX(x, y)] != 0;
+}
+
+int powerLink(int i) { return linkOf.empty() ? -1 : linkOf[i]; }
+
+bool powerNetInfo(int x, int y, float& gen, float& load, float& stored, float& cap) {
+    if (!inb(x, y) || netOf.empty()) return false;
+    int n = netOf[IDX(x, y)];
+    if (n < 0 || n >= (int)nets.size()) return false;
+    gen = nets[n].gen; load = nets[n].load; stored = nets[n].stored; cap = nets[n].cap;
+    return true;
+}
+
+// ---------------------------------------------------------------- irrigation
+// Wells (1.5 bar) and electric pumps beside water (4.5 bar, need battery power) pressurise a pipe
+// network; sources within PIPE tiles of each other share it. Each sprinkler/drip line within PIPE tiles
+// of a source joins it. Every device that is scheduled on uses some pressure; a device only sprays if
+// the pressure left on its network is at least its minimum. Too many devices starve the whole line.
+static const float PIPE = 8.f;
+struct WaterNet { float supply = 0, draw = 0, drawAll = 0; };
+static std::vector<WaterNet> wnets;
+static std::vector<int> wLink, wNet, wLinked;
+static std::vector<uint8_t> spraying, covered;
+
+static bool isWaterSource(uint8_t o) { return o == O_WELL || o == O_PUMP; }
+static bool isWaterUser(uint8_t o) { return o == O_SPRINKLER || o == O_DRIP || o == O_WATERFALL; }
+bool isWaterObj(uint8_t o) { return isWaterSource(o) || isWaterUser(o); }
+static float waterDraw(uint8_t o) { return o == O_SPRINKLER ? 1.2f : o == O_WATERFALL ? 1.0f : 0.25f; }
+float waterMinPressure(uint8_t o) { return o == O_SPRINKLER ? 2.0f : o == O_WATERFALL ? 1.5f : 0.6f; }
+static int waterRadius(uint8_t o) { return o == O_SPRINKLER ? 3 : o == O_WATERFALL ? 0 : 1; }
+
+static const char* TIMER_NAMES[] = {"Always on", "Mornings 05-08", "Evenings 18-21", "Morning + evening", "Off"};
+const char* timerName(int mode) { return TIMER_NAMES[std::clamp(mode, 0, 4)]; }
+bool timerActive(int mode) {
+    float h = g->tod * 24;
+    bool morning = h >= 5 && h < 8, evening = h >= 18 && h < 21;
+    switch (mode) { case 0: return true; case 1: return morning; case 2: return evening; case 3: return morning || evening; default: return false; }
+}
+static int deviceMode(int i) { return std::clamp((int)g->tiles[i].timer, 0, 4); }
+
+static bool pumpInWater(int x, int y) {
+    for (int k = -1; k <= 1; k++) for (int j = -1; j <= 1; j++) {
+        if (!inb(x + j, y + k)) continue;
+        if (isWater(x + j, y + k) || g->tiles[IDX(x + j, y + k)].obj == O_POND) return true;
+    }
+    return false;
+}
+
+static void updateWater(float dt) {
+    int N = WW * WH;
+    if (wLink.empty()) { wLink.assign(N, -1); wNet.assign(N, -1); spraying.assign(N, 0); covered.assign(N, 0); pumpWanted.assign(N, 0); }
+    for (int i : wLinked) { wLink[i] = -1; wNet[i] = -1; spraying[i] = 0; pumpWanted[i] = 0; }
+    wLinked.clear();
+    std::fill(covered.begin(), covered.end(), 0);
+    wnets.clear();
+    std::vector<int> sources, users;
+    for (int i = 0; i < N; i++) {
+        uint8_t o = g->tiles[i].obj;
+        if (isWaterSource(o)) sources.push_back(i);
+        else if (isWaterUser(o)) users.push_back(i);
+    }
+    std::vector<int> parent(sources.size());
+    for (size_t a = 0; a < sources.size(); a++) parent[a] = (int)a;
+    std::function<int(int)> root = [&](int a) { while (parent[a] != a) a = parent[a] = parent[parent[a]]; return a; };
+    for (size_t a = 0; a < sources.size(); a++)
+        for (size_t b = a + 1; b < sources.size(); b++)
+            if (dist(sources[a] % WW, sources[a] / WW, sources[b] % WW, sources[b] / WW) <= PIPE) parent[root((int)a)] = root((int)b);
+    std::vector<int> netFor(sources.size(), -1);
+    for (size_t a = 0; a < sources.size(); a++) {
+        int r = root((int)a);
+        if (netFor[r] < 0) { netFor[r] = (int)wnets.size(); wnets.emplace_back(); }
+        int i = sources[a];
+        wNet[i] = netFor[r]; wLink[i] = i; wLinked.push_back(i);
+    }
+    for (int i : users) {
+        int x = i % WW, y = i / WW, best = -1;
+        float bd = PIPE + 0.01f;
+        for (int s : sources) { float d = dist(x, y, s % WW, s / WW); if (d < bd) { bd = d; best = s; } }
+        if (best < 0) continue;
+        wLink[i] = best; wNet[i] = wNet[best]; wLinked.push_back(i);
+        uint8_t o = g->tiles[i].obj;
+        int mode = deviceMode(i);
+        if (lineBroken(g->tiles[i])) {   // a chewed line leaks constantly
+            wnets[wNet[i]].draw += 1.f; wnets[wNet[i]].drawAll += 1.f;
+            for (int s : sources) if (wNet[s] == wNet[i] && g->tiles[s].obj == O_PUMP) pumpWanted[s] = 1;
+            continue;
+        }
+        if (mode != 4) wnets[wNet[i]].drawAll += waterDraw(o);
+        if (timerActive(mode)) {
+            wnets[wNet[i]].draw += waterDraw(o);
+            for (int s : sources) if (wNet[s] == wNet[i] && g->tiles[s].obj == O_PUMP) pumpWanted[s] = 1;
+        }
+    }
+    for (int s : sources) {
+        int x = s % WW, y = s / WW;
+        float p = 0;
+        if (g->tiles[s].obj == O_WELL) p = 1.5f;
+        else if (pumpInWater(x, y) && poweredAt(x, y)) p = 4.5f;
+        wnets[wNet[s]].supply += p;
+    }
+    for (int i : users) {
+        if (wNet[i] < 0) continue;
+        const WaterNet& n = wnets[wNet[i]];
+        uint8_t o = g->tiles[i].obj;
+        int x = i % WW, y = i / WW, R = waterRadius(o);
+        if (lineBroken(g->tiles[i])) { if (n.supply > 0) g->moist[i] = 1; continue; }   // a muddy puddle at the break
+        float minP = waterMinPressure(o);
+        bool works = n.supply - n.draw >= minP;
+        bool canWork = n.supply - n.drawAll >= minP || works;     // would work on its schedule
+        spraying[i] = timerActive(deviceMode(i)) && works;
+        if (deviceMode(i) != 4 && canWork && o != O_WATERFALL)
+            for (int yy = y - R; yy <= y + R; yy++) for (int xx = x - R; xx <= x + R; xx++) if (inb(xx, yy)) covered[IDX(xx, yy)] = 1;
+        if (!spraying[i]) continue;
+        float rate = o == O_SPRINKLER ? 0.12f : 0.15f;
+        for (int yy = y - R; yy <= y + R; yy++)
+            for (int xx = x - R; xx <= x + R; xx++)
+                if (inb(xx, yy)) g->moist[IDX(xx, yy)] = std::min(1.f, g->moist[IDX(xx, yy)] + rate * dt);
+    }
+}
+
+void breakLine(int x, int y) {
+    Tile& t = g->tiles[IDX(x, y)];
+    if (t.obj != O_SPRINKLER && t.obj != O_DRIP) return;
+    t.var |= VAR_BROKEN;
+    static float lastMsg = -1000;
+    if (g->totalTime - lastMsg > 30 || g->totalTime < lastMsg) {
+        lastMsg = g->totalTime;
+        logMsg(std::string("Coyotes chewed through a ") + OBJS[t.obj].name + "! Water is spraying out - right-click it to repair.", Color{230, 190, 120, 255});
+    }
+}
+
+void repairLine(int x, int y) {
+    g->tiles[IDX(x, y)].var &= (uint8_t)~VAR_BROKEN;
+    burst(x + 0.5f, y + 0.5f, Color{150, 200, 255, 255}, 6);
+}
+
+bool irrigating(int x, int y) { return inb(x, y) && !spraying.empty() && spraying[IDX(x, y)]; }
+bool leaking(int x, int y) {
+    if (!inb(x, y) || wNet.empty() || wNet[IDX(x, y)] < 0 || !lineBroken(g->tiles[IDX(x, y)])) return false;
+    return wnets[wNet[IDX(x, y)]].supply > 0;
+}
+bool irrigationCovers(int x, int y) { return inb(x, y) && !covered.empty() && covered[IDX(x, y)]; }
+int waterLink(int i) { return wLink.empty() ? -1 : wLink[i]; }
+bool waterNetInfo(int x, int y, float& supply, float& draw, float& pressure) {
+    if (!inb(x, y) || wNet.empty() || wNet[IDX(x, y)] < 0) return false;
+    const WaterNet& n = wnets[wNet[IDX(x, y)]];
+    supply = n.supply; draw = n.draw; pressure = n.supply - n.draw;
+    return true;
 }
 
 // ---------------------------------------------------------------- tribes & roads
@@ -591,9 +1016,44 @@ static void spawnWolfPack() {
     }
 }
 
+static void spawnCoyotes() {
+    int lines = 0, birds = 0;
+    for (auto& t : g->tiles) if (t.obj == O_DRIP || t.obj == O_SPRINKLER) lines++;
+    for (auto& e : g->ents) if (e.alive && e.tame && (e.kind == E_DUCK || e.kind == E_FOWL)) birds++;
+    if (!lines && !birds) return;
+    float chance = std::min(0.5f, 0.15f + lines * 0.015f) * (g->season() == 3 ? 0.6f : 1.f);
+    if (rnd() > chance) return;
+    for (int attempt = 0; attempt < 60; attempt++) {
+        float a = rndr(0, 6.283f), d = rndr(24, 36);
+        int x = (int)(g->pl.x + std::cos(a) * d), y = (int)(g->pl.y + std::sin(a) * d);
+        if (!inb(x, y) || solidFor(x, y, 1) || isWater(x, y)) continue;
+        int n = rndi(1, 2) + (lines > 20 ? 1 : 0);
+        for (int k = 0; k < n; k++) {
+            Ent& c = spawnEnt(E_COYOTE, x + rndr(-1, 1), y + rndr(-1, 1));
+            c.state = 1; c.homeX = (float)x; c.homeY = (float)y;
+        }
+        return;
+    }
+}
+
+static void spawnPorcupine() {
+    int alive = 0;
+    for (auto& e : g->ents) if (e.alive && e.kind == E_PORCUPINE) alive++;
+    if (alive >= 2 || rnd() > (g->season() >= 2 ? 0.35f : 0.1f)) return;
+    for (int attempt = 0; attempt < 80; attempt++) {
+        float a = rndr(0, 6.283f), d = rndr(18, 32);
+        int x = (int)(g->pl.x + std::cos(a) * d), y = (int)(g->pl.y + std::sin(a) * d);
+        if (!inb(x, y) || solidFor(x, y, 1) || g->ground[IDX(x, y)] != G_FOREST) continue;
+        Ent& p = spawnEnt(E_PORCUPINE, x + 0.5f, y + 0.5f);
+        p.homeX = x + 0.5f; p.homeY = y + 0.5f;
+        return;
+    }
+}
+
 static void dawn() {
+    spawnPorcupine();
     g->stats.nightsSurvived++;
-    for (auto& e : g->ents) if (e.alive && e.kind == E_WOLF) e.state = 2;  // retreat
+    for (auto& e : g->ents) if (e.alive && (e.kind == E_WOLF || e.kind == E_COYOTE)) e.state = 2;  // retreat
     float bx, by;
     if (baseCentre(bx, by)) { /* autosave handled in main loop via flag */ }
     g->autosaveMsg = -1;  // request autosave
@@ -607,28 +1067,79 @@ void newDay() {
     g->dayTempOffset = rndr(-3, 3);
     int s = g->season();
     int dos = g->dayOfSeason();
-    if (dos == 0) {
-        logMsg(std::string("~ ") + SEASON_NAMES[s] + " of year " + std::to_string(g->year()) + " begins ~", Color{255, 230, 150, 255});
-        if (s == 0) {
-            g->frostHappened = false; g->frostWarned = false;
-            if (g->day > 1) g->stats.wintersSurvived++;
-        }
-    }
+    if (dos == 0 && g->day > 0) logMsg("~ Week " + std::to_string(g->week()) + " begins ~", Color{255, 230, 150, 255});
     // soil
     float evap = s == 1 ? 0.3f : (s == 3 ? 0.08f : 0.18f);
     if (g->drought) evap *= 1.8f;
     if (g->heatwave) evap *= 1.5f;
     for (int i = 0; i < WW * WH; i++) {
         if (g->ground[i] != G_GREENHOUSE || !g->indoor[i]) g->moist[i] = clampf(g->moist[i] - evap, 0, 1);
-        if (g->ground[i] == G_TILLED && !g->crops[i].type && rnd() < 0.04f) g->fert[i] = std::min(0.6f, g->fert[i] + 0.02f);
+        if (g->ground[i] == G_TILLED && !g->crops[i].type && rnd() < 0.04f) {   // slow recovery while fallow
+            if (g->fert[i] < 0.6f) g->fert[i] += 0.02f;
+            if (g->phos[i] < 0.6f) g->phos[i] += 0.015f;
+            if (g->pota[i] < 0.6f) g->pota[i] += 0.015f;
+        }
         if (g->ground[i] == G_BURNT && rnd() < 0.12f && s != 3) g->ground[i] = G_GRASS;
+    }
+    // water table: soil within 4 tiles of open water or a pond stays damp
+    for (int y = 0; y < WH; y++)
+        for (int x = 0; x < WW; x++) {
+            int i = IDX(x, y);
+            if (g->ground[i] != G_TILLED || g->moist[i] >= 0.3f) continue;
+            bool near = false;
+            for (int k = -4; k <= 4 && !near; k++)
+                for (int j = -4; j <= 4; j++)
+                    if (inb(x + j, y + k) && (isWater(x + j, y + k) || g->tiles[IDX(x + j, y + k)].obj == O_POND) && j * j + k * k <= 16) { near = true; break; }
+            if (near) g->moist[i] = 0.3f;
+        }
+    // weekly leaf drop: deciduous trees feed the soil around them
+    if (dos == 0)
+        for (int y = 2; y < WH - 2; y++)
+            for (int x = 2; x < WW - 2; x++) {
+                uint8_t o = g->tiles[IDX(x, y)].obj;
+                if (!isDeciduous(o)) continue;
+                for (int k = -2; k <= 2; k++)
+                    for (int j = -2; j <= 2; j++) {
+                        int i = IDX(x + j, y + k);
+                        if (j * j + k * k <= 5 && !isWater(x + j, y + k)) addNutrients(i, 0.01f, 0.005f, 0.02f);   // leaf litter is rich in potassium
+                    }
+            }
+    // fruit: mature plants ripen every cycle (trees 7 days, vines and canes 4); ripe fruit waits to be picked.
+    // fruitState: 1 = ripe, otherwise counts days since the last harvest (or since the plant matured)
+    {
+        int ripened = 0;
+        for (int i = 0; i < WW * WH; i++) {
+            uint8_t o = g->tiles[i].obj;
+            if (!isFruitPlant(o)) continue;
+            uint8_t& st = g->fruitState[i];
+            if (st == 1) continue;
+            int cycle = isFruitTree(o) ? DAYS_PER_SEASON : 4;
+            st = (uint8_t)std::min(250, std::max(2, (int)st) + 1);
+            if (st >= 2 + cycle) { st = 1; ripened++; }
+        }
+        if (ripened) logMsg("Fruit is ripe in your orchard and hedgerows.", Color{240, 170, 90, 255});
     }
     // vegetation
     for (int y = 1; y < WH - 1; y++)
         for (int x = 1; x < WW - 1; x++) {
             int i = IDX(x, y);
             Tile& t = g->tiles[i];
-            if (t.obj == O_SAPLING) { t.timer += 1; if (t.timer >= 6 && s != 3) { removeObject(x, y, false); placeObject(x, y, rnd() < 0.5f ? O_OAK : O_PINE); } }
+            if (t.obj == O_SAPLING) {
+                t.timer += g->moist[i] > 0.5f ? 2 : 1;
+                if (t.timer >= DAYS_PER_SEASON) {   // fully grown after one cycle
+                    int grow = (t.var >> 2) & 7;   // species planted (0 = wild oak or pine, 5 = fruit variety)
+                    static const int kinds[] = {0, O_MAPLE, O_MTNASH, O_ASPEN, O_SERVICEBERRY};
+                    int gene = g->fruitGene[i];
+                    int o = grow > 0 && grow < 5 ? kinds[grow] : (rnd() < 0.5f ? O_OAK : O_PINE);
+                    if (gene >= 0) { static const int fk[] = {O_APPLE, O_PEAR, O_APRICOT}; o = fk[g->genes[gene].kind]; }
+                    bool guard = t.var & VAR_GUARD;
+                    removeObject(x, y, false);
+                    placeObject(x, y, o);
+                    g->fruitGene[i] = gene;
+                    g->fruitState[i] = 2;   // first fruit one cycle after maturing
+                    if (guard) t.var |= VAR_GUARD;
+                }
+            }
             else if (t.obj == O_BUSH && t.var >= 4 && (s == 0 || s == 1)) { if (rnd() < 0.4f) t.var -= 4; }
             else if (t.obj == O_ASH && rnd() < 0.15f) removeObject(x, y, false);
             else if (t.obj == O_NONE && s != 3 && !g->crops[i].type) {
@@ -641,23 +1152,23 @@ void newDay() {
     // floods recede
     if (g->floodActive) {
         for (int i = 0; i < WW * WH; i++)
-            if (g->flooded[i]) { g->ground[i] = g->origGround[i]; g->flooded[i] = 0; g->moist[i] = 1; }
+            if (g->flooded[i]) { g->ground[i] = g->origGround[i]; g->flooded[i] = 0; g->moist[i] = 1; addNutrients(i, 0.1f, 0.12f, 0.12f); }
         g->floodActive = false;
         logMsg("The flood waters recede.", Color{150, 200, 255, 255});
     }
     // disasters
     g->heatwave = false;
     if (s == 1 && g->dryDays >= 3 && !g->drought) { g->drought = true; logMsg("DROUGHT: no rain for days. Soil dries fast and fire spreads easily.", Color{255, 190, 90, 255}); }
-    if (s == 1 && rnd() < 0.2f) { g->heatwave = true; logMsg("HEATWAVE: scorching day ahead. Drink water and stay in shade.", Color{255, 150, 60, 255}); }
-    if (s == 1 && rnd() < 0.15f) {
+    if (rnd() < 0.08f) { g->heatwave = true; logMsg("HEATWAVE: scorching day ahead. Drink water and stay in shade.", Color{255, 150, 60, 255}); }
+    if (rnd() < 0.08f) {
         logMsg("A swarm of insects descends on the fields!", Color{230, 200, 90, 255});
         for (auto& c : g->crops) if (c.type && !c.dead) c.pest = std::min(1.f, c.pest + 0.35f);
     }
     if (s == 3 && rnd() < 0.25f) { g->weather = WX_BLIZZARD; g->weatherTimer = 150; logMsg("BLIZZARD! Extreme cold today.", Color{200, 230, 255, 255}); }
-    if (s == 0 && dos == 1 && g->day > DAYS_PER_SEASON * 4 && rnd() < 0.55f) {
+    if (g->stormYesterday && g->day > DAYS_PER_SEASON && rnd() < 0.4f) {
         int dams = 0;
         for (auto& t : g->tiles) if (t.obj == O_DAM) dams++;
-        if (dams > 0) logMsg("Snowmelt swells the river - your dam holds back the flood.", Color{150, 200, 255, 255});
+        if (dams > 0) logMsg("Storm runoff swells the river - your dam holds back the flood.", Color{150, 200, 255, 255});
         else {
             g->origGround = g->ground;
             int n = 0;
@@ -677,7 +1188,7 @@ void newDay() {
                     if (o && !OBJS[o].structure) removeObject(x, y, false);
                 }
             g->floodActive = n > 0;
-            if (n) logMsg("FLOOD! Spring snowmelt has flooded the riverbanks. A dam would control it.", Color{120, 170, 255, 255});
+            if (n) logMsg("FLOOD! Yesterday's storm has flooded the riverbanks. A dam would control it.", Color{120, 170, 255, 255});
         }
     }
     // frost warning for tomorrow night
@@ -690,6 +1201,8 @@ void newDay() {
             logMsg("Geese fly south. The first frost is near - harvest your crops!", Color{170, 210, 255, 255});
         }
     }
+    g->stormYesterday = false;
+    dailyBees();
     dailyCrops();
     tribeDaily();
     spawnWildlife(false);
@@ -699,6 +1212,22 @@ void newDay() {
 
 // ---------------------------------------------------------------- goals
 static bool anyObj(int o) { for (auto& t : g->tiles) if (t.obj == o) return true; return false; }
+static bool anyFruit() {
+    for (int i = 0; i < WW * WH; i++) if (isFruitPlant(g->tiles[i].obj) || (g->tiles[i].obj == O_SAPLING && g->fruitGene[i] >= 0)) return true;
+    return false;
+}
+static bool anyBees() {
+    for (auto& t : g->tiles) if (t.obj == O_BEEHIVE && (t.var & VAR_BEES)) return true;
+    return false;
+}
+static bool anyIrrigating() {
+    for (int i = 0; i < WW * WH; i++) if ((g->tiles[i].obj == O_SPRINKLER || g->tiles[i].obj == O_DRIP) && irrigating(i % WW, i / WW)) return true;
+    return false;
+}
+static bool anyPowered(int o) {
+    for (int i = 0; i < WW * WH; i++) if (g->tiles[i].obj == o && poweredAt(i % WW, i / WW)) return true;
+    return false;
+}
 
 void initGoals() {
     if (g->goals.empty()) {
@@ -708,20 +1237,20 @@ void initGoals() {
             {"Build a shelter", "Enclose a bed with walls and a door. Indoors is warmer."},
             {"Plant a crop", "Till grass with a hoe, then plant seeds. Wild seeds come from tall grass."},
             {"Tame an animal", "Hold food an animal likes and right-click it repeatedly."},
-            {"Dress for winter", "Wear a fur coat or better. Cold kills."},
+            {"Plant an orchard tree", "Plant an apple seed or fruit sapling. It matures in a week, then fruits weekly."},
             {"Store food properly", "Granaries and root cellars keep food from rotting."},
             {"Get a guard dog", "Tame a dog with meat. Dogs fight off wolves."},
             {"Dig a well", "Workers need water. A well provides it."},
             {"Start composting", "Put manure, leaves or moldy food in a compost bin."},
             {"Recruit a worker", "Trade with a friendly village. Have a free bed ready."},
             {"Open a trade route", "Build road from a village to a trading post."},
-            {"Survive the first winter", "Hay for livestock, warm clothes, stored food."},
-            {"Generate electricity", "Water wheel by a dam, or solar panels."},
-            {"Grow food under glass", "Greenhouse frames on tilled soil grow year-round."},
-            {"Automate irrigation", "Powered sprinklers water crops for you."},
+            {"Thrive for four weeks", "Keep everyone fed, watered and housed for 28 days."},
+            {"Generate electricity", "Solar panel or water wheel wired to a battery bank (within 8 tiles)."},
+            {"Keep bees", "Build a hive near flowers; a wild swarm will move in."},
+            {"Automate irrigation", "Pipe sprinklers or drip lines to a well or pump."},
             {"Refrigerated storage", "A powered cold store nearly stops spoilage."},
             {"Run a biogas digester", "Turn manure into power and compost."},
-            {"Generate 40W of clean power", "Scale up wheels, panels and digesters."},
+            {"Generate 5 kW of clean power", "Scale up wheels, panels and digesters on your battery network."},
             {"A working farm: 5 workers", "Every worker needs a bed, food and water."},
             {"Self-sustaining", "With 3+ workers, produce more food than everyone eats in a day."},
         };
@@ -736,12 +1265,10 @@ void updateGoals() {
         if (e.kind == E_WORKER) workers++;
         if (e.tame) { tameAny++; if (e.kind == E_DOG) tameDog++; }
     }
-    float insul = 0;
-    for (auto& w : g->pl.wear) if (w.id) insul += ITEMS[w.id].insul;
-    bool bedIndoor = false, ghCrop = false, anyCrop = false;
+    bool bedIndoor = false, anyCrop = false;
     for (int i = 0; i < WW * WH; i++) {
         if (g->tiles[i].obj == O_BED && g->indoor[i]) bedIndoor = true;
-        if (g->crops[i].type) { anyCrop = true; if (g->ground[i] == G_GREENHOUSE) ghCrop = true; }
+        if (g->crops[i].type) anyCrop = true;
     }
     bool road = false;
     for (auto& t : g->tribes) road |= t.road;
@@ -751,20 +1278,20 @@ void updateGoals() {
         bedIndoor,
         anyCrop || g->goals[3].done,
         tameAny > 0,
-        insul >= 10,
+        anyFruit(),
         g->stats.usedGranary,
         tameDog > 0,
         anyObj(O_WELL),
         g->stats.composted > 0,
         workers > 0,
         road,
-        g->stats.wintersSurvived > 0,
-        g->powerGen > 0.5f,
-        ghCrop,
-        anyObj(O_SPRINKLER) && g->powered,
-        anyObj(O_FRIDGE) && g->powered,
-        biogasOutput > 0,
-        g->powerGen >= 40,
+        g->day >= 28,
+        g->powerGen > 0.05f,
+        anyBees(),
+        anyIrrigating(),
+        anyPowered(O_FRIDGE),
+        anyBiogas,
+        g->powerGen >= 5,
         workers >= 5,
         workers >= 3 && g->day >= DAYS_PER_SEASON && g->stats.lastFoodMade > g->stats.lastFoodEaten && g->stats.lastFoodEaten > 0,
     };
@@ -787,7 +1314,7 @@ void simUpdate(float dt) {
     g->totalTime += dt;
     if (g->tod >= 1.f) { g->tod -= 1.f; newDay(); duskDone = dawnDone = false; }
     if (!dawnDone && prevTod < 0.27f && g->tod >= 0.27f) { dawnDone = true; dawn(); }
-    if (!duskDone && prevTod < 0.80f && g->tod >= 0.80f) { duskDone = true; spawnWolfPack(); }
+    if (!duskDone && prevTod < 0.80f && g->tod >= 0.80f) { duskDone = true; spawnWolfPack(); spawnCoyotes(); }
     // raids launch at dusk
     if (prevTod < 0.76f && g->tod >= 0.76f)
         for (size_t k = 0; k < g->tribes.size(); k++) {
@@ -812,6 +1339,7 @@ void simUpdate(float dt) {
     if ((g->weather == WX_SNOW || g->weather == WX_BLIZZARD) && air < 1) g->snowCover = std::min(1.f, g->snowCover + dt * 0.01f);
     else if (air > 2) g->snowCover = std::max(0.f, g->snowCover - dt * 0.004f * (air - 1));
     if (g->weather == WX_STORM) {
+        g->stormYesterday = true;
         g->lightningTimer -= dt;
         if (g->lightningTimer <= 0) {
             g->lightningTimer = rndr(15, 40);
@@ -821,7 +1349,7 @@ void simUpdate(float dt) {
             if (inb(x, y)) {
                 uint8_t o = g->tiles[IDX(x, y)].obj;
                 float ch = g->drought ? 0.7f : (g->season() == 1 ? 0.35f : 0.12f);
-                if ((o == O_OAK || o == O_PINE || o == O_BIRCH) && rnd() < ch) {
+                if (isTreeObj(o) && rnd() < ch) {
                     startFire(x, y);
                     logMsg("Lightning struck a tree - FIRE!", Color{255, 130, 60, 255});
                 }
@@ -842,7 +1370,7 @@ void simUpdate(float dt) {
         updateSpoilage(sdtDays);
         updateProcessors(sdtDays);
         updatePower(sdt);
-        updateSprinklers(sdt);
+        updateWater(sdt);
         // bushes regrow berries in summer/autumn
         for (auto& t : g->tiles)
             if (t.obj == O_BUSH && t.var >= 4 && g->season() != 3) { t.timer += sdtDays; if (t.timer > 2.5f) { t.var -= 4; t.timer = 0; } }
@@ -910,8 +1438,157 @@ void drainReservoir(int dx, int dy) {
             if (held) continue;
             g->reservoir[i] = 0;
             g->ground[i] = G_DIRT;   // rich silt left behind
-            g->fert[i] = std::min(1.2f, g->fert[i] + 0.4f);
+            addNutrients(i, 0.3f, 0.3f, 0.3f);
             n++;
         }
     if (n) logMsg("The reservoir drains, leaving " + std::to_string(n) + " tiles of fertile silt.", Color{170, 140, 100, 255});
+}
+
+// ---------------------------------------------------------------- beauty & morale
+static float beautyCache = 0, beautyT = -100;
+
+static bool nearBuilding(int i) {
+    int x = i % WW, y = i / WW;
+    for (int yy = y - 4; yy <= y + 4; yy++)
+        for (int xx = x - 4; xx <= x + 4; xx++)
+            if (inb(xx, yy)) { uint8_t o = g->tiles[IDX(xx, yy)].obj; if (o && OBJS[o].structure && !isFruitPlant(o) && o != O_FLOWERS) return true; }
+    return false;
+}
+
+static float tileBeauty(int i) {
+    const Tile& t = g->tiles[i];
+    float b = 0;
+    int s = g->season();
+    if (isTreeObj(t.obj) && !isFruitTree(t.obj) && !nearBuilding(i)) return 0;   // wild woods aren't landscaping
+    switch (t.obj) {
+        case O_MAPLE: case O_MTNASH: case O_SERVICEBERRY: b = 3; break;
+        case O_ASPEN: case O_OAK: case O_BIRCH: b = 2; break;
+        case O_PINE: b = 1; break;
+        case O_POND: b = 4; break;
+        case O_FLOWERS: b = s <= 1 ? 2.5f : (s == 2 ? 1.f : 0.3f); break;
+        case O_WATERFALL: b = irrigating(i % WW, i / WW) ? 8.f : 1.f; break;
+        case O_BEEHIVE: b = 1; break;
+        case O_LAMP: case O_TORCHPOST: case O_BIRDHOUSE: b = 0.5f + (t.obj == O_BIRDHOUSE ? 0.5f : 0); break;
+        case O_APPLE: case O_PEAR: case O_APRICOT: case O_GRAPEVINE: b = 2; break;
+        case O_MANURE: b = -1.5f; break;
+        case O_ASH: b = -2; break;
+        case O_STUMP: b = -1; break;
+        case O_SPRINKLER: case O_DRIP: if (t.var & VAR_BROKEN) b = -2; break;
+        default: break;
+    }
+    if (g->crops[i].type && g->crops[i].dead) b -= 1;
+    if (g->ground[i] == G_BURNT) b -= 0.5f;
+    return b;
+}
+
+float farmBeauty() {
+    if (g->totalTime - beautyT < 3 && beautyT <= g->totalTime) return beautyCache;
+    beautyT = g->totalTime;
+    float bx, by;
+    if (!baseCentre(bx, by)) { beautyCache = 0; return 0; }
+    float sum = 0;
+    for (int y = (int)by - 16; y <= (int)by + 16; y++)
+        for (int x = (int)bx - 16; x <= (int)bx + 16; x++)
+            if (inb(x, y)) sum += tileBeauty(IDX(x, y));
+    beautyCache = clampf(sum, -40, 100);
+    return beautyCache;
+}
+
+// How hard a worker works: a pretty farm and good morale speed everything up.
+float workRate(const Ent& e) {
+    float r = 1.f + clampf(farmBeauty(), -20, 60) / 150.f;
+    if (e.mood >= 70) r *= 1.05f;
+    else if (e.mood < 35) r *= 0.85f;
+    return r;
+}
+
+int saplingFor(int o) {
+    switch (o) {
+        case O_MAPLE: return I_SAP_MAPLE;
+        case O_MTNASH: return I_SAP_ASH;
+        case O_ASPEN: return I_SAP_ASPEN;
+        case O_SERVICEBERRY: return I_SAP_SERVICE;
+        default: return I_SAPLING;
+    }
+}
+int treeForSapling(int item) {
+    switch (item) {
+        case I_APPLESEED: case I_SAP_PEAR: case I_SAP_APRICOT: return 5;
+        case I_SAP_MAPLE: return 1;
+        case I_SAP_ASH: return 2;
+        case I_SAP_ASPEN: return 3;
+        case I_SAP_SERVICE: return 4;
+        default: return 0;
+    }
+}
+
+// ---------------------------------------------------------------- orchard
+static const char* FRUIT_COLORS[] = {"green", "red", "yellow", "russet", "striped red"};
+
+int newGene(int kind, bool seedling) {
+    FruitGenes gn;
+    gn.kind = (uint8_t)kind;
+    if (seedling) {
+        // apples don't come true from seed: most seedlings are small and sour
+        gn.size = rnd();
+        gn.nutrition = std::pow(rnd(), 1.6f);
+        gn.color = (uint8_t)rndi(0, 4);
+    } else {
+        gn.size = rndr(0.5f, 0.7f); gn.nutrition = rndr(0.55f, 0.75f); gn.color = kind == FK_APPLE ? 1 : 2;
+    }
+    g->genes.push_back(gn);
+    return (int)g->genes.size() - 1;
+}
+
+std::string geneDesc(int id) {
+    if (id < 0 || id >= (int)g->genes.size()) return "unknown variety";
+    const FruitGenes& gn = g->genes[id];
+    static const char* kinds[] = {"apple", "pear", "apricot"};
+    const char* size = gn.size < 0.2f ? "tiny" : gn.size < 0.4f ? "small" : gn.size < 0.65f ? "medium" : gn.size < 0.85f ? "large" : "huge";
+    const char* taste = gn.nutrition < 0.33f ? "sour spitter" : gn.nutrition < 0.75f ? "decent" : "sweet, nourishing";
+    return TextFormat("%s %s %s, %s (#%d)", size, gn.kind == FK_APPLE ? FRUIT_COLORS[gn.color % 5] : "", kinds[gn.kind % 3], taste, id);
+}
+
+Color fruitColor(int i) {
+    switch (g->tiles[i].obj) {
+        case O_APPLE: {
+            int gid = g->fruitGene[i];
+            int c = gid >= 0 && gid < (int)g->genes.size() ? g->genes[gid].color : 1;
+            static const Color cols[] = {{140, 200, 70, 255}, {210, 40, 40, 255}, {240, 210, 60, 255}, {170, 120, 60, 255}, {220, 80, 60, 255}};
+            return cols[c % 5];
+        }
+        case O_PEAR: return Color{200, 210, 80, 255};
+        case O_APRICOT: return Color{245, 150, 50, 255};
+        case O_GRAPEVINE: return Color{110, 50, 130, 255};
+        case O_BLACKBERRY: return Color{40, 20, 40, 255};
+        default: return Color{220, 40, 70, 255};
+    }
+}
+
+bool harvestFruit(int x, int y, bool byWorker, float wx, float wy) {
+    int i = IDX(x, y);
+    uint8_t o = g->tiles[i].obj;
+    if (!isFruitPlant(o) || g->fruitState[i] != 1) return false;
+    g->fruitState[i] = 2;
+    int id = I_BERRIES, n = 3;
+    int gid = g->fruitGene[i];
+    FruitGenes gn = gid >= 0 && gid < (int)g->genes.size() ? g->genes[gid] : FruitGenes{};
+    switch (o) {
+        case O_APPLE:
+            id = gn.nutrition < 0.33f ? I_APPLE_SPITTER : gn.nutrition < 0.75f ? I_APPLE : I_APPLE_PRIZE;
+            n = (int)std::round(3 + gn.size * 7);
+            break;
+        case O_PEAR: id = I_PEAR; n = (int)std::round(3 + gn.size * 5); break;
+        case O_APRICOT: id = I_APRICOT; n = (int)std::round(3 + gn.size * 5); break;
+        case O_GRAPEVINE: id = I_GRAPES; n = 4; break;
+        case O_BLACKBERRY: id = I_BLACKBERRY; n = 4; break;
+        case O_RASPBERRY: id = I_RASPBERRY; n = 3; break;
+    }
+    if (beesNear(x, y)) n = (int)std::round(n * 1.35f);
+    if (o == O_APPLE && rnd() < 0.5f) { if (byWorker) storeAnywhere(I_APPLESEED, 2, 1, wx, wy); else addToPlayer(I_APPLESEED, 2); }
+    if (byWorker) { if (!storeAnywhere(id, n, 1, wx, wy)) warnStorageFull(ITEMS[id].name); }
+    else { addToPlayer(id, n); floatText(x + 0.5f, y - 1, "+" + std::to_string(n) + " " + ITEMS[id].name, Color{255, 200, 140, 255}); }
+    g->stats.foodMade += ITEMS[id].food * n;
+    burst(x + 0.5f, y, fruitColor(i), 5);
+    return true;
 }

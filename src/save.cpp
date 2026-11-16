@@ -5,7 +5,7 @@
 #include <type_traits>
 
 static const char MAGIC[4] = {'H', 'R', 'T', 'H'};
-static const uint32_t VERSION = 2;
+static const uint32_t VERSION = 8;
 
 struct Writer {
     std::vector<uint8_t> buf;
@@ -67,9 +67,10 @@ bool saveGame(const char* path) {
     w.put((uint32_t)g->tiles.size());
     for (auto& t : g->tiles) { w.put(t.obj); w.put(t.hp); w.put(t.cont); w.put(t.var); w.put(t.timer); }
     w.put((uint32_t)g->crops.size());
-    for (auto& c : g->crops) { w.put(c.type); w.put(c.growth); w.put(c.pest); w.put(c.dead); }
-    w.vec(g->moist); w.vec(g->fert); w.vec(g->fire); w.vec(g->height);
+    for (auto& c : g->crops) { w.put(c.type); w.put(c.growth); w.put(c.pest); w.put(c.dead); w.put(c.manure); }
+    w.vec(g->moist); w.vec(g->fert); w.vec(g->phos); w.vec(g->pota); w.vec(g->litter); w.vec(g->fire); w.vec(g->height);
     w.vec(g->river); w.vec(g->flooded); w.vec(g->seen); w.vec(g->reservoir);
+    w.vec(g->genes); w.vec(g->fruitGene); w.vec(g->fruitState);
     w.put((uint32_t)g->conts.size());
     for (auto& c : g->conts) {
         w.put(c.kind); w.put(c.x); w.put(c.y); w.put(c.alive);
@@ -85,6 +86,8 @@ bool saveGame(const char* path) {
         w.put(e.state); w.put(e.tame); w.put(e.follow); w.put(e.trust); w.put(e.hunger); w.put(e.homeX); w.put(e.homeY);
         w.put(e.produce); w.put(e.baby); w.put(e.age); w.put(e.sleeping); w.put(e.job); w.put(e.thirst); w.put(e.mood);
         w.put(e.bed); putStack(w, e.carry); w.put(e.tribe); w.str(e.name); w.put(e.look); w.put(e.torch);
+        for (uint8_t d : e.diet) w.put(d);
+        w.put(e.dietI);
     }
     w.put((uint32_t)g->tribes.size());
     for (auto& t : g->tribes) {
@@ -140,12 +143,20 @@ bool loadGame(const char* path) {
         if (r.get<uint32_t>() != N) r.bad = true;
         ng->crops.resize(N);
         for (auto& c : ng->crops) {
-            c.type = r.get<uint8_t>(); c.growth = r.get<float>(); c.pest = r.get<float>(); c.dead = r.get<bool>();
+            c.type = r.get<uint8_t>(); c.growth = r.get<float>(); c.pest = r.get<float>(); c.dead = r.get<bool>(); c.manure = r.get<bool>();
             if (c.type >= CR_COUNT) r.bad = true;
             if (r.bad) break;
         }
-        r.vec(ng->moist, N); r.vec(ng->fert, N); r.vec(ng->fire, N); r.vec(ng->height, N);
+        r.vec(ng->moist, N); r.vec(ng->fert, N); r.vec(ng->phos, N); r.vec(ng->pota, N); r.vec(ng->litter, N); r.vec(ng->fire, N); r.vec(ng->height, N);
         r.vec(ng->river, N); r.vec(ng->flooded, N); r.vec(ng->seen, N); r.vec(ng->reservoir, N);
+        {
+            uint32_t ng_genes = r.get<uint32_t>();
+            if (ng_genes > 100000) r.bad = true;
+            else { r.off -= sizeof(uint32_t); r.vec(ng->genes, ng_genes); }
+            for (auto& gn : ng->genes) if (gn.kind > FK_APRICOT) r.bad = true;
+        }
+        r.vec(ng->fruitGene, N); r.vec(ng->fruitState, N);
+        for (int gid : ng->fruitGene) if (gid < -1 || gid >= (int)ng->genes.size()) { r.bad = true; break; }
         uint32_t nc = r.get<uint32_t>();
         if (nc > N) r.bad = true;
         for (uint32_t k = 0; k < nc && !r.bad; k++) {
@@ -167,6 +178,8 @@ bool loadGame(const char* path) {
             e.state = r.get<int>(); e.tame = r.get<bool>(); e.follow = r.get<bool>(); e.trust = r.get<float>(); e.hunger = r.get<float>(); e.homeX = r.get<float>(); e.homeY = r.get<float>();
             e.produce = r.get<float>(); e.baby = r.get<bool>(); e.age = r.get<float>(); e.sleeping = r.get<bool>(); e.job = r.get<uint8_t>(); e.thirst = r.get<float>(); e.mood = r.get<float>();
             e.bed = r.get<int>(); e.carry = getStack(r); e.tribe = r.get<int>(); e.name = r.str(); e.look = r.get<uint8_t>(); e.torch = r.get<bool>();
+            for (auto& d : e.diet) { d = r.get<uint8_t>(); if (d >= I_COUNT) r.bad = true; }
+            e.dietI = r.get<uint8_t>() % 12;
             if (e.kind >= E_KCOUNT || e.job >= J_COUNT || !inb((int)e.x, (int)e.y) || e.bed < -1 || e.bed >= (int)N || e.tribe < -1 || e.tribe > 8) { r.bad = true; break; }
             e.look &= 3;
             ng->ents.push_back(std::move(e));

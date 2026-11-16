@@ -105,6 +105,7 @@ void removeObject(int x, int y, bool dropContents) {
     }
     if (OBJS[t.obj].wallLike) g->indoorDirty = true;
     t.obj = O_NONE; t.hp = 0; t.cont = -1; t.timer = 0;
+    if (!g->fruitGene.empty()) { g->fruitGene[IDX(x, y)] = -1; g->fruitState[IDX(x, y)] = 0; }
 }
 
 Ent& spawnEnt(int kind, float x, float y) {
@@ -346,6 +347,9 @@ void generateWorld(uint32_t seed) {
     g->crops.assign(N, Crop{});
     g->moist.assign(N, 0.5f);
     g->fert.assign(N, 0.5f);
+    g->phos.assign(N, 0.5f);
+    g->litter.assign(N, 0.f);
+    g->pota.assign(N, 0.5f);
     g->fire.assign(N, 0.f);
     g->predator.assign(N, 0.f);
     g->height.assign(N, 0.f);
@@ -354,6 +358,9 @@ void generateWorld(uint32_t seed) {
     g->flooded.assign(N, 0);
     g->seen.assign(N, 0);
     g->reservoir.assign(N, 0);
+    g->genes.clear();
+    g->fruitGene.assign(N, -1);
+    g->fruitState.assign(N, 0);
     g->conts.clear();
     g->ents.clear();
     g->ents.reserve(4096);
@@ -377,7 +384,11 @@ void generateWorld(uint32_t seed) {
             else if (m > 0.54f) gr = G_FOREST;
             else if (m < 0.36f && noise2(x / 7.f, y / 7.f, seed + 77) > 0.6f) gr = G_DIRT;
             g->ground[i] = gr;
-            g->fert[i] = gr == G_FOREST ? 0.75f : (gr == G_GRASS ? 0.55f : 0.4f);
+            // soil starts fairly rich, with patches short of one nutrient or another
+            float base = gr == G_FOREST ? 0.75f : (gr == G_GRASS ? 0.65f : 0.45f);
+            g->fert[i] = clampf(base + (noise2(x / 9.f, y / 9.f, seed + 501) - 0.5f) * 0.4f, 0.2f, 1.f);
+            g->phos[i] = clampf(base + (noise2(x / 11.f, y / 11.f, seed + 502) - 0.5f) * 0.5f, 0.2f, 1.f);
+            g->pota[i] = clampf(base + (noise2(x / 10.f, y / 10.f, seed + 503) - 0.5f) * 0.5f, 0.2f, 1.f);
         }
     carveRiver(seed + 55);
     // sand banks next to deep river
@@ -401,23 +412,33 @@ void generateWorld(uint32_t seed) {
             bool waterAdj = isWater(x + 1, y) || isWater(x - 1, y) || isWater(x, y + 1) || isWater(x, y - 1);
             if (gr == G_FOREST) {
                 float pineBias = noise2(x / 20.f, y / 20.f, seed + 300);
-                if (r < 0.42f) placeObject(x, y, pineBias > 0.55f ? O_PINE : (rnd() < 0.3f ? O_BIRCH : O_OAK));
-                else if (r < 0.47f) placeObject(x, y, O_BUSH);
+                if (r < 0.42f) {
+                    // Inland Northwest mix: pines on the dry slopes, natives in the moister woods
+                    float t = rnd();
+                    int o = pineBias > 0.55f ? O_PINE : t < 0.28f ? O_OAK : t < 0.42f ? O_BIRCH : t < 0.6f ? O_ASPEN : t < 0.76f ? O_MAPLE : t < 0.88f ? O_MTNASH : O_SERVICEBERRY;
+                    placeObject(x, y, o);
+                }
+                else if (r < 0.46f) placeObject(x, y, O_BUSH);
+                else if (r < 0.47f) { placeObject(x, y, rnd() < 0.5f ? O_RASPBERRY : O_BLACKBERRY); g->fruitState[i] = (uint8_t)rndi(2, 5); }
                 else if (r < 0.52f) placeObject(x, y, O_BRANCH);
                 else if (r < 0.56f) placeObject(x, y, O_TALLGRASS);
             } else if (gr == G_GRASS) {
-                if (r < 0.035f) placeObject(x, y, rnd() < 0.5f ? O_OAK : O_BIRCH);
+                if (r < 0.003f) { placeObject(x, y, O_APPLE); g->fruitGene[i] = newGene(FK_APPLE, true); g->fruitState[i] = (uint8_t)rndi(2, 8); }   // feral apple from an old homestead
+                else if (r < 0.035f) { float t = rnd(); placeObject(x, y, t < 0.35f ? O_OAK : t < 0.6f ? O_BIRCH : t < 0.8f ? O_ASPEN : O_SERVICEBERRY); }
                 else if (r < 0.055f) placeObject(x, y, O_BUSH);
                 else if (r < 0.19f) placeObject(x, y, O_TALLGRASS);
                 else if (r < 0.205f) placeObject(x, y, O_ROCK);
                 else if (r < 0.225f) placeObject(x, y, O_BRANCH);
                 else if (r < 0.232f) placeObject(x, y, O_FLINT);
+                else if (r < 0.236f) placeObject(x, y, O_WILDPOTATO);
                 if (waterAdj && rnd() < 0.18f) { removeObject(x, y, false); placeObject(x, y, O_CLAY); }
             } else if (gr == G_STONE) {
                 if (r < 0.22f) placeObject(x, y, O_ROCK);
-                else if (r < 0.27f) placeObject(x, y, O_ORE);
-                else if (r < 0.31f) placeObject(x, y, O_FLINT);
-                else if (r < 0.33f) placeObject(x, y, O_PINE);
+                else if (r < 0.26f) placeObject(x, y, O_ORE);
+                else if (r < 0.295f) placeObject(x, y, O_IRONORE);
+                else if (r < 0.31f) placeObject(x, y, O_QUARTZ);
+                else if (r < 0.33f) placeObject(x, y, O_FLINT);
+                else if (r < 0.35f) placeObject(x, y, O_PINE);
             } else if (gr == G_SAND) {
                 if (waterAdj && r < 0.16f) placeObject(x, y, O_CLAY);
                 else if (r < 0.03f) placeObject(x, y, O_FLINT);
@@ -479,8 +500,8 @@ void generateWorld(uint32_t seed) {
         if (!placed) { t.x = (int)clampf(g->pl.x + (k - 1) * 40, 12, WW - 12); t.y = (int)clampf(g->pl.y + 40, 12, WH - 12); }
         // stock
         auto add = [&](int id, int n) { Stack s; s.id = (uint8_t)id; s.n = (int16_t)n; t.stock.push_back(s); };
-        if (k == 0) { add(I_GLASS, 12); add(I_COPPER, 6); add(I_BEANS, 20); add(I_CABBAGESEED, 15); add(I_WHEATSEED, 20); add(I_CLOTH, 4); add(I_BUCKET, 2); add(I_SHEARS, 1); add(I_BREAD, 6); }
-        else if (k == 1) { add(I_COPPER, 10); add(I_ORE, 20); add(I_LEATHER, 8); add(I_WOOL, 12); add(I_POTATO, 20); add(I_SICKLE, 1); add(I_JERKY, 10); add(I_FURCOAT, 1); add(I_BRICK, 20); }
+        if (k == 0) { add(I_GLASS, 12); add(I_COPPER, 6); add(I_BEANS, 20); add(I_CABBAGESEED, 15); add(I_WHEATSEED, 20); add(I_CLOTH, 4); add(I_BUCKET, 2); add(I_SHEARS, 1); add(I_BREAD, 6); add(I_SAP_MAPLE, 4); add(I_SAP_ASH, 4); add(I_APPLESEED, 12); add(I_TOMATOSEED, 10); add(I_GREENBEANSEED, 15); add(I_BUCKWHEAT, 15); add(I_MUSTARDSEED, 12); add(I_SAP_PEAR, 3); add(I_GRAPECUTTING, 4); add(I_SILICON, 4); }
+        else if (k == 1) { add(I_COPPER, 10); add(I_ORE, 20); add(I_LEATHER, 8); add(I_WOOL, 12); add(I_POTATO, 20); add(I_SICKLE, 1); add(I_JERKY, 10); add(I_FURCOAT, 1); add(I_BRICK, 20); add(I_SAP_ASPEN, 4); add(I_SAP_SERVICE, 4); add(I_SAP_APRICOT, 3); add(I_SQUASHSEED, 10); add(I_RASPCANE, 4); add(I_BLACKCANE, 4); add(I_IRON, 6); add(I_IRONORE, 10); add(I_TIMER, 2); }
         t.nextRaid = DAYS_PER_SEASON + rndi(2, 5);
         g->tribes.push_back(t);
     }

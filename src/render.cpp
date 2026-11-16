@@ -52,6 +52,36 @@ static void drawCrop(int x, int y, const Crop& c) {
                 if (stage >= 2) DrawCircle(cx + 1, base - r, r * 0.6f, Color{170, 220, 150, 255});
                 break;
             }
+            case CR_TOMATO: {
+                int h = 3 + stage * 2;
+                DrawRectangle(cx + 1, base - h, 1, h, Color{70, 140, 60, 255});
+                DrawCircle(cx + 1, base - h, 1.5f + stage * 0.5f, green);
+                if (stage == 3) { DrawRectangle(cx - 1, base - h + 2, 2, 2, Color{220, 40, 30, 255}); DrawRectangle(cx + 2, base - h + 4, 2, 2, Color{230, 60, 40, 255}); }
+                break;
+            }
+            case CR_SQUASH: {
+                DrawCircle(cx + 1, base - 2, 1 + stage, green);
+                if (stage >= 2) DrawEllipse(cx + 1, base - 1, 1.5f + stage * 0.5f, 1.3f + stage * 0.3f, stage == 3 ? Color{230, 140, 40, 255} : Color{140, 170, 70, 255});
+                break;
+            }
+            case CR_GREENBEAN: {
+                int h = 2 + stage * 2;
+                DrawRectangle(cx, base - h, 3, h, green);
+                if (stage == 3) { DrawRectangle(cx - 1, base - h + 1, 1, 3, Color{120, 200, 90, 255}); DrawRectangle(cx + 3, base - h + 2, 1, 3, Color{120, 200, 90, 255}); }
+                break;
+            }
+            case CR_BUCKWHEAT: {
+                int h = 2 + stage * 2;
+                DrawRectangle(cx, base - h, 2, h, Color{140, 60, 60, 255});
+                DrawCircle(cx + 1, base - h, 1 + stage * 0.6f, stage >= 2 ? Color{245, 235, 240, 255} : green);
+                break;
+            }
+            case CR_MUSTARD: {
+                int h = 2 + stage * 2;
+                DrawRectangle(cx, base - h, 3, h, Color{100, 160, 70, 255});
+                if (stage >= 2) DrawRectangle(cx - 1, base - h - 1, 4, 2, Color{240, 220, 60, 255});
+                break;
+            }
             case CR_BEANS: {
                 int h = 3 + stage * 3;
                 DrawRectangle(cx + 1, base - h - 1, 1, h + 1, Color{140, 110, 70, 255});
@@ -158,6 +188,14 @@ static void drawPlayer() {
     }
 }
 
+static void drawFishing() {
+    Player& p = g->pl;
+    if (!p.fishing) return;
+    float bx = p.bobX * TS + 8, by = p.bobY * TS + 8 + (p.biteTimer > 0 ? std::sin(g->totalTime * 30) * 1.5f : std::sin(g->totalTime * 3) * 0.5f);
+    DrawLineEx({p.x * TS + p.face * 8, p.y * TS - 18}, {bx, by}, 0.4f, Color{230, 230, 230, 200});
+    DrawCircle(bx, by, 1.5f, p.biteTimer > 0 ? Color{255, 230, 60, 255} : Color{230, 50, 40, 255});
+}
+
 void renderWorld() {
     Player& p = g->pl;
     int sw = GetScreenWidth(), sh = GetScreenHeight();
@@ -196,7 +234,24 @@ void renderWorld() {
                 if (!isWater(x + 1, y)) DrawRectangle(x * TS + TS - 1, y * TS, 1, TS, Color{200, 230, 255, 90});
             }
             if ((gr == G_TILLED || gr == G_GREENHOUSE) && g->moist[i] > 0.4f) DrawRectangle(x * TS, y * TS, TS, TS, Color{20, 10, 0, (unsigned char)(g->moist[i] * 60)});
-            if (gr == G_TILLED && g->fert[i] > 0.8f) DrawRectangle(x * TS + 2, y * TS + 2, 2, 1, Color{50, 30, 20, 200});
+            if ((gr == G_TILLED || gr == G_GREENHOUSE) && !g->crops[i].type && soilMin(i) < 0.3f) DrawRectangle(x * TS + 1, y * TS + 1, TS - 2, TS - 2, Color{200, 180, 120, 50});   // tired, pale soil
+            if (vs == 2 && (gr == G_GRASS || gr == G_FOREST || gr == G_DIRT)) {
+                bool under = false;
+                for (int k = -1; k <= 1 && !under; k++)
+                    for (int j = -1; j <= 1; j++) {
+                        if (!inb(x + j, y + k)) continue;
+                        uint8_t o = g->tiles[IDX(x + j, y + k)].obj;
+                        if (isDeciduous(o)) { under = true; break; }
+                    }
+                if (under)
+                    for (int k = 0; k < 6; k++) {
+                        uint32_t h = hash32(i * 13 + k);
+                        Color lc = k % 3 == 0 ? Color{200, 90, 40, 255} : k % 3 == 1 ? Color{220, 160, 50, 255} : Color{160, 110, 50, 255};
+                        DrawRectangle(x * TS + (h % 15), y * TS + ((h >> 8) % 15), 2, 1, lc);
+                    }
+            }
+            if (g->litter[i] > 0.15f)
+                for (int k = 0; k < (int)(g->litter[i] * 6); k++) { uint32_t h = hash32(i * 31 + k); DrawRectangle(x * TS + (h % 14) + 1, y * TS + ((h >> 8) % 14) + 1, 1, 1, Color{235, 230, 215, 220}); }
             if (g->crops[i].type) drawCrop(x, y, g->crops[i]);
         }
 
@@ -211,9 +266,32 @@ void renderWorld() {
             if (flat) DrawTexturePro(atlas, objSrc(o, vs, g->tiles[IDX(x, y)].var), Rectangle{(float)x * TS, (float)y * TS - TS, TS, TS * 2}, {0, 0}, 0, WHITE);
             else list.push_back({(float)y + 0.99f, 0, IDX(x, y)});
         }
+    for (int y = std::max(0, y0 - 8); y <= std::min(WH - 1, y1 + 8); y++)
+        for (int x = std::max(0, x0 - 8); x <= std::min(WW - 1, x1 + 8); x++) {
+            int i = IDX(x, y);
+            uint8_t o = g->tiles[i].obj;
+            if (!o || o == O_BATTERY || !isPowerObj(o)) continue;
+            int b = powerLink(i);
+            if (b < 0) continue;
+            Vector2 a{x * TS + 8.f, y * TS + 12.f}, c{(b % WW) * TS + 8.f, (b / WW) * TS + 10.f};
+            Vector2 mid{(a.x + c.x) / 2, (a.y + c.y) / 2 + 3};   // slight sag
+            Color wire = poweredAt(x, y) ? Color{40, 34, 30, 220} : Color{120, 40, 30, 220};
+            DrawLineEx(a, mid, 0.7f, wire);
+            DrawLineEx(mid, c, 0.7f, wire);
+        }
+    for (int y = std::max(0, y0 - 8); y <= std::min(WH - 1, y1 + 8); y++)
+        for (int x = std::max(0, x0 - 8); x <= std::min(WW - 1, x1 + 8); x++) {
+            int i = IDX(x, y);
+            uint8_t o = g->tiles[i].obj;
+            if (o != O_SPRINKLER && o != O_DRIP) continue;
+            int s = waterLink(i);
+            if (s < 0) continue;
+            Color pipe = irrigating(x, y) ? Color{70, 140, 220, 230} : Color{60, 80, 110, 200};
+            DrawLineEx({x * TS + 8.f, y * TS + 14.f}, {(s % WW) * TS + 8.f, (s / WW) * TS + 14.f}, 1.2f, pipe);
+        }
     for (size_t k = 0; k < g->ents.size(); k++) {
         const Ent& e = g->ents[k];
-        if (!e.alive || e.id == p.riding) continue;
+        if (!e.alive || e.id == p.riding || e.hidden) continue;
         if (e.x < x0 - 1 || e.x > x1 + 1 || e.y < y0 - 1 || e.y > y1 + 2) continue;
         list.push_back({e.y, 1, (int)k});
     }
@@ -234,13 +312,66 @@ void renderWorld() {
             if (t.obj == O_CAMPFIRE) drawFlame(cx, by, 0.9f, x * 7.f);
             else if (t.obj == O_BONFIRE) drawFlame(cx, by - 1, 1.4f, x * 7.f);
             else if (t.obj == O_TORCHPOST) drawFlame(cx, y * TS - 2, 0.5f, x * 3.f);
-            else if (t.obj == O_LAMP && g->powered && sunLevel() < 0.5f) DrawRectangle(x * TS + 5, y * TS - 10, 6, 6, Color{255, 255, 220, 255});
+            else if (t.obj == O_LAMP && poweredAt(x, y) && sunLevel() < 0.5f) DrawRectangle(x * TS + 5, y * TS - 10, 6, 6, Color{255, 255, 220, 255});
             else if (t.obj == O_WHEEL) {
                 float a = g->totalTime * 60;
                 for (int k = 0; k < 4; k++) {
                     float ang = (a + k * 45) * DEG2RAD;
                     DrawLineEx({cx + std::cos(ang) * 7, y * TS + 5 + std::sin(ang) * 7}, {cx - std::cos(ang) * 7, y * TS + 5 - std::sin(ang) * 7}, 1, Color{80, 54, 32, 255});
                 }
+            }
+            if (isFruitPlant(t.obj) && g->fruitState[d.a] == 1) {   // ripe fruit
+                Color fc = fruitColor(d.a);
+                bool tree = isFruitTree(t.obj);
+                for (int k = 0; k < (tree ? 7 : 5); k++) {
+                    uint32_t h = hash32(d.a * 7 + k);
+                    float fx = x * TS + 3 + (h % 10), fy = tree ? y * TS - 12 + ((h >> 8) % 12) : y * TS + 4 + ((h >> 8) % 7);
+                    DrawRectangle(fx, fy, 2, 2, fc);
+                }
+            }
+            if (t.var & VAR_GUARD && (isTreeObj(t.obj) || t.obj == O_SAPLING)) {   // wire mesh around the trunk
+                DrawRectangleLines(x * TS + 4, y * TS + 6, 8, 8, Color{190, 190, 200, 230});
+                DrawLine(x * TS + 4, y * TS + 10, x * TS + 12, y * TS + 10, Color{190, 190, 200, 160});
+            }
+            if ((t.obj == O_SPRINKLER || t.obj == O_DRIP || t.obj == O_WATERFALL) && (t.var & VAR_TIMER)) DrawCircle(x * TS + 13, y * TS + 3, 1.5f, Color{120, 220, 140, 255});
+            if (t.obj == O_BEEHIVE && (t.var & VAR_BEES) && sunLevel() > 0.3f && g->season() != 3 && airTemp() > 8)
+                for (int k = 0; k < 6; k++) {   // buzzing bees
+                    float a = g->totalTime * (2.5f + k * 0.37f) + k * 1.9f;
+                    DrawRectangle(x * TS + 8 + std::cos(a) * (6 + k * 2.5f), y * TS + 2 + std::sin(a * 1.3f) * (4 + k), 1, 1, k % 2 ? Color{250, 210, 50, 255} : Color{40, 30, 20, 255});
+                }
+            if (t.obj == O_BIRDHOUSE && sunLevel() > 0.3f && g->season() != 3)
+                for (int k = 0; k < 2; k++) {
+                    float a = g->totalTime * (1.3f + k * 0.4f) + d.a;
+                    float bx = x * TS + 8 + std::cos(a) * (14 + k * 6), by2 = y * TS - 14 + std::sin(a * 1.7f) * 8;
+                    float flap = std::sin(g->totalTime * 14 + k) > 0 ? 1 : 0;
+                    DrawLine(bx - 2, by2 - flap, bx, by2, Color{60, 50, 50, 255}); DrawLine(bx, by2, bx + 2, by2 - flap, Color{60, 50, 50, 255});
+                }
+            if (isDeciduous(t.obj) && t.hp < OBJS[t.obj].hp)   // stripped bark
+                DrawRectangle(x * TS + 6, y * TS + 8, 4, 3, Color{235, 215, 170, 255});
+            if (t.obj == O_WATERFALL && irrigating(x, y)) {
+                float ph = g->totalTime * 30;
+                for (int k = 0; k < 3; k++) {
+                    float sx = x * TS + 5 + k * 3;
+                    DrawRectangle(sx, y * TS - 10, 2, 22, Color{150, 205, 250, 200});
+                    DrawRectangle(sx, y * TS - 10 + std::fmod(ph + k * 7, 20.f), 2, 3, Color{240, 250, 255, 255});
+                }
+                if (rnd() < 0.4f) g->parts.push_back({x + 0.5f + rndr(-0.3f, 0.3f), y + 0.75f, rndr(-0.6f, 0.6f), rndr(-1.5f, -0.5f), 0.4f, 0.4f, Color{220, 240, 255, 200}, 1.5f, 0});
+            }
+            if (lineBroken(t)) {
+                if (leaking(x, y))
+                    for (int k = 0; k < 2; k++)
+                        g->parts.push_back({x + 0.5f + rndr(-0.1f, 0.1f), y + 0.6f, rndr(-0.8f, 0.8f), rndr(-5.f, -3.5f), 0.6f, 0.6f, Color{150, 210, 255, 230}, 2.f, 0});
+                DrawRectangle(x * TS + 6, y * TS + 4, 4, 1, Color{230, 60, 50, 255});
+                DrawRectangle(x * TS + 7, y * TS + 3, 2, 3, Color{230, 60, 50, 255});
+            }
+            if ((t.obj == O_SPRINKLER || t.obj == O_DRIP) && irrigating(x, y) && rnd() < 0.5f) {
+                float a = rndr(0, 6.283f), r = t.obj == O_SPRINKLER ? 2.5f : 0.6f;
+                g->parts.push_back({x + 0.5f, y + 0.4f, std::cos(a) * r, std::sin(a) * r - (t.obj == O_SPRINKLER ? 1.f : 0.f), 0.5f, 0.5f, Color{140, 200, 255, 200}, 1.5f, 3});
+            }
+            if (t.obj == O_BATTERY) {
+                float f = clampf(t.timer / 10.f, 0, 1);
+                DrawRectangle(x * TS + 4, y * TS + 8, 8, 2, Color{20, 30, 20, 255});
+                DrawRectangle(x * TS + 4, y * TS + 8, 8 * f, 2, f > 0.25f ? Color{90, 230, 120, 255} : Color{240, 90, 60, 255});
             }
             if (OBJS[t.obj].structure && t.hp < OBJS[t.obj].hp && t.obj != O_DAM) {
                 DrawRectangle(x * TS + 2, y * TS - 18, 12, 2, Color{40, 10, 10, 200});
@@ -250,6 +381,7 @@ void renderWorld() {
         else drawPlayer();
     }
 
+    drawFishing();
     // ---- fire
     for (int i : g->fireTiles) {
         int x = i % WW, y = i / WW;
@@ -343,8 +475,8 @@ void renderWorld() {
             for (int x = std::max(0, x0 - 10); x <= std::min(WW - 1, x1 + 10); x++) {
                 uint8_t o = g->tiles[IDX(x, y)].obj;
                 if (!o || OBJS[o].light <= 0) continue;
-                if (o == O_LAMP && !g->powered) continue;
-                if (o == O_HEATER && !g->powered) continue;
+                if (o == O_LAMP && (!poweredAt(x, y) || sunLevel() >= 0.3f)) continue;
+                if (o == O_HEATER && (!poweredAt(x, y) || airTemp() >= 16)) continue;
                 bool fireish = o == O_CAMPFIRE || o == O_TORCHPOST || o == O_BONFIRE || o == O_KILN;
                 light(x + 0.5f, y + 0.3f, OBJS[o].light * (fireish ? flick : 1), OBJS[o].lightCol);
             }

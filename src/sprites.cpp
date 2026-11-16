@@ -10,7 +10,7 @@ static int CX = 0, CY = 0, CW = 16, CH = 16;
 // layout
 static const int GROUND_Y = 0;                 // 16x16 cells, (g*4+season)*4+var
 static const int OBJ_Y = 64;                    // 16x32 cells, (obj*4+season)*4+var
-static const int ITEM_Y = 64 + 32 * 15;         // 16x16 cells
+static const int ITEM_Y = OBJ_Y + 32 * 20;      // 16x16 cells
 static const int ENT_Y = ITEM_Y + 16 * 3;       // 24x24 cells, ((kind*6+frame)*4+look)
 static const int ENT_KINDS = E_KCOUNT + 1;      // +1 for the player
 
@@ -154,9 +154,10 @@ static void drawGround(int gr, int s, int v) {
 
 // ---------------------------------------------------------------- objects (16x32, base on bottom 16 rows)
 static void tree(int kind, int s, int v) {
-    Color trunk = kind == O_BIRCH ? rgb(225, 222, 210) : rgb(110, 74, 44);
-    rect(6, 20, 4, 11, trunk);
-    if (kind == O_BIRCH) { P(7, 23, rgb(40, 40, 40)); P(8, 27, rgb(40, 40, 40)); P(6, 25, rgb(40, 40, 40)); }
+    Color trunk = (kind == O_BIRCH || kind == O_ASPEN) ? rgb(225, 222, 210) : kind == O_MAPLE ? rgb(120, 100, 90) : rgb(110, 74, 44);
+    bool small = kind == O_SERVICEBERRY || kind == O_MTNASH || kind == O_APRICOT;
+    rect(6, 20, small ? 3 : 4, 11, trunk);
+    if (kind == O_BIRCH || kind == O_ASPEN) { P(7, 23, rgb(40, 40, 40)); P(8, 27, rgb(40, 40, 40)); P(6, 25, rgb(40, 40, 40)); }
     P(5, 30, mul(trunk, 0.8f)); P(10, 30, mul(trunk, 0.8f));
     int lean = (v % 2) ? 1 : 0;
     if (kind == O_PINE) {
@@ -173,6 +174,13 @@ static void tree(int kind, int s, int v) {
     }
     Color leaf;
     if (kind == O_OAK) leaf = s == 0 ? rgb(110, 180, 70) : s == 1 ? rgb(70, 140, 56) : s == 2 ? (v % 2 ? rgb(200, 90, 40) : rgb(214, 140, 50)) : rgb(0, 0, 0, 0);
+    else if (kind == O_MAPLE) leaf = s == 0 ? rgb(120, 180, 80) : s == 1 ? rgb(80, 150, 60) : s == 2 ? (v % 2 ? rgb(210, 40, 40) : rgb(230, 70, 40)) : rgb(0, 0, 0, 0);
+    else if (kind == O_MTNASH) leaf = s == 0 ? rgb(130, 190, 90) : s == 1 ? rgb(90, 160, 70) : s == 2 ? rgb(230, 120, 40) : rgb(0, 0, 0, 0);
+    else if (kind == O_ASPEN) leaf = s == 0 ? rgb(160, 205, 100) : s == 1 ? rgb(120, 180, 80) : s == 2 ? rgb(245, 205, 50) : rgb(0, 0, 0, 0);
+    else if (kind == O_SERVICEBERRY) leaf = s == 0 ? rgb(245, 245, 250) : s == 1 ? rgb(90, 150, 70) : s == 2 ? rgb(190, 60, 70) : rgb(0, 0, 0, 0);
+    else if (kind == O_APPLE) leaf = s == 0 ? rgb(250, 215, 225) : s == 1 ? rgb(80, 150, 60) : s == 2 ? rgb(170, 160, 60) : rgb(0, 0, 0, 0);
+    else if (kind == O_PEAR) leaf = s == 0 ? rgb(250, 250, 250) : s == 1 ? rgb(70, 140, 60) : s == 2 ? rgb(200, 90, 50) : rgb(0, 0, 0, 0);
+    else if (kind == O_APRICOT) leaf = s == 0 ? rgb(250, 180, 200) : s == 1 ? rgb(90, 155, 65) : s == 2 ? rgb(220, 160, 60) : rgb(0, 0, 0, 0);
     else leaf = s == 0 ? rgb(150, 196, 90) : s == 1 ? rgb(110, 170, 70) : s == 2 ? rgb(230, 190, 60) : rgb(0, 0, 0, 0);
     if (s == 3) {
         // bare branches with snow
@@ -186,6 +194,9 @@ static void tree(int kind, int s, int v) {
     ell(11 + lean, 9, 4.5f, 4.5f, leaf);
     ell(8 + lean, 6, 4.5f, 4, mul(leaf, 1.1f));
     speckle(1, 2, 14, 16, mul(leaf, 1.25f), 0.06f, v + kind);
+    if (kind == O_MTNASH && (s == 1 || s == 2)) for (int k = 0; k < 6; k++) { int x = 3 + (int)(hn(k, v, 7) * 10), y = 6 + (int)(hn(k, v, 8) * 10); P(x, y, rgb(230, 40, 30)); P(x + 1, y, rgb(200, 30, 30)); P(x, y + 1, rgb(200, 30, 30)); }
+    if (kind == O_SERVICEBERRY && s == 1) for (int k = 0; k < 6; k++) { int x = 3 + (int)(hn(k, v, 5) * 10), y = 6 + (int)(hn(k, v, 6) * 10); P(x, y, rgb(90, 40, 100)); }
+    if (kind == O_ASPEN) speckle(1, 2, 14, 16, mul(leaf, 1.35f), 0.08f, v + 99);   // shimmering leaves
     if (s == 0 && kind == O_OAK && v == 1) { P(4, 8, rgb(255, 220, 230)); P(11, 6, rgb(255, 220, 230)); P(9, 12, rgb(255, 220, 230)); }
 }
 
@@ -193,7 +204,55 @@ static void drawObj(int o, int s, int v) {
     bool snow = s == 3;
     Color wood = rgb(150, 104, 60), dark = rgb(90, 60, 36), stone = rgb(138, 138, 146);
     switch (o) {
-        case O_OAK: case O_PINE: case O_BIRCH: tree(o, s, v); break;
+        case O_OAK: case O_PINE: case O_BIRCH: case O_MAPLE: case O_MTNASH: case O_ASPEN: case O_SERVICEBERRY:
+        case O_APPLE: case O_PEAR: case O_APRICOT: tree(o, s, v); break;
+        case O_GRAPEVINE:
+            rect(2, 16, 2, 15, wood); rect(12, 16, 2, 15, wood); line(2, 18, 13, 18, rgb(120, 120, 120)); line(2, 23, 13, 23, rgb(120, 120, 120));
+            line(8, 30, 8, 18, rgb(100, 70, 50)); line(8, 22, 3, 18, rgb(100, 70, 50)); line(8, 21, 13, 18, rgb(100, 70, 50));
+            if (s != 3) for (int k = 0; k < 9; k++) ell(3 + (k % 5) * 2.5f, 17 + (k / 5) * 5, 1.8f, 1.5f, s == 2 ? rgb(200, 170, 60) : rgb(80, 150, 60));
+            break;
+        case O_BLACKBERRY: case O_RASPBERRY: {
+            Color c = s == 3 ? rgb(110, 80, 70) : s == 2 ? rgb(150, 90, 60) : (o == O_BLACKBERRY ? rgb(50, 110, 50) : rgb(80, 150, 70));
+            for (int k = 0; k < 6; k++) line(3 + k * 2, 31, 2 + k * 2 + (k % 3), 20 + k % 2 * 2, mul(o == O_BLACKBERRY ? rgb(120, 50, 60) : rgb(150, 90, 70), 1.f));
+            if (s != 3) { ell(8, 25, 6.5f, 4.5f, c); ell(6, 23, 3, 2.5f, mul(c, 1.15f)); }
+            if (o == O_BLACKBERRY) speckle(2, 21, 12, 9, rgb(200, 190, 190), 0.05f, v);   // thorns
+            break;
+        }
+        case O_WILDPOTATO: for (int k = 0; k < 4; k++) ell(4 + k * 3, 26 - (k % 2) * 2, 2.5f, 2, s == 3 ? rgb(120, 110, 90) : rgb(90, 150, 70)); if (s <= 1) { P(6, 23, WHITE); P(10, 22, rgb(220, 200, 240)); } break;
+        case O_MINE:
+            ell(8, 26, 7.5f, 5, rgb(120, 116, 112));
+            ell(8, 27, 4.5f, 4, rgb(20, 16, 14), false);
+            rect(2, 18, 2, 12, rgb(110, 76, 44)); rect(12, 18, 2, 12, rgb(110, 76, 44)); rect(2, 17, 12, 2, rgb(130, 90, 54));
+            line(5, 31, 11, 31, rgb(90, 90, 96)); line(6, 30, 6, 31, rgb(90, 90, 96)); line(10, 30, 10, 31, rgb(90, 90, 96));
+            break;
+        case O_BIRDHOUSE:
+            rect(7, 18, 2, 13, rgb(110, 76, 44));
+            rect(4, 10, 8, 8, rgb(170, 120, 70));
+            for (int k = 0; k < 5; k++) rect(8 - k - 1, 5 + k, (k + 1) * 2, 1, rgb(140, 60, 50), false);
+            ell(8, 13, 1.5f, 1.5f, rgb(30, 20, 15), false);
+            break;
+        case O_BEEHIVE:
+            rect(4, 27, 2, 4, rgb(90, 60, 36)); rect(10, 27, 2, 4, rgb(90, 60, 36));
+            rect(3, 17, 10, 4, rgb(235, 220, 170)); rect(3, 21, 10, 3, rgb(220, 200, 150)); rect(3, 24, 10, 3, rgb(235, 220, 170));
+            rect(2, 15, 12, 2, rgb(150, 110, 70)); rect(6, 25, 4, 1, rgb(40, 30, 20), false);
+            break;
+        case O_IRONORE: ell(8, 26, 6.5f, 4.5f, rgb(110, 104, 100)); P(5, 25, rgb(170, 80, 50)); P(6, 26, rgb(150, 70, 40)); P(10, 24, rgb(170, 80, 50)); P(9, 27, rgb(150, 70, 40)); P(11, 26, rgb(170, 80, 50)); break;
+        case O_QUARTZ: ell(8, 27, 6.5f, 4, rgb(120, 120, 128)); line(6, 26, 5, 21, rgb(240, 240, 255)); line(8, 26, 9, 20, rgb(225, 230, 250)); line(10, 27, 12, 23, rgb(240, 240, 255)); P(9, 21, WHITE); break;
+        case O_FLOWERS: {
+            static const Color pal[5] = {rgb(250, 200, 50), rgb(150, 110, 220), rgb(240, 120, 160), rgb(250, 250, 250), rgb(230, 90, 60)};   // balsamroot, lupine, ...
+            for (int k = 0; k < 12; k++) {
+                int x = 2 + (int)(hn(k, v, 1) * 12), y = 21 + (int)(hn(k, v, 2) * 9);
+                line(x, y + 2, x, y, s == 3 ? rgb(130, 110, 80) : rgb(70, 140, 60));
+                if (s <= 1) { P(x, y - 1, pal[(k + v) % 5]); P(x + 1, y - 1, mul(pal[(k + v) % 5], 0.85f)); }
+                else if (s == 2) P(x, y - 1, rgb(170, 120, 70));
+            }
+            break;
+        }
+        case O_WATERFALL:
+            ell(8, 28, 7.5f, 3, rgb(60, 120, 190), false);
+            ell(4, 18, 3.5f, 4.5f, rgb(128, 128, 136)); ell(11, 15, 4, 6, rgb(118, 118, 126)); ell(8, 22, 5, 3.5f, rgb(140, 140, 148));
+            ell(12, 9, 2.5f, 2, rgb(90, 140, 70)); P(3, 13, rgb(90, 140, 70));
+            break;
         case O_SAPLING: line(8, 30, 8, 22, rgb(110, 80, 50)); ell(8, 22, 3, 2.5f, s == 3 ? rgb(140, 120, 90) : rgb(110, 180, 80)); break;
         case O_STUMP: rect(5, 25, 6, 5, rgb(120, 82, 50)); ell(8, 25, 3, 1.4f, rgb(190, 150, 100), false); P(8, 25, rgb(140, 100, 60)); break;
         case O_BUSH: {
@@ -299,6 +358,8 @@ static void drawObj(int o, int s, int v) {
         case O_TOTEM: rect(6, 8, 4, 23, rgb(80, 60, 50)); ell(8, 8, 3.5f, 3.5f, rgb(230, 220, 200)); P(7, 8, BLACK); P(9, 8, BLACK); rect(7, 10, 3, 1, BLACK, false); rect(4, 14, 8, 1, rgb(170, 30, 30), false); rect(4, 19, 8, 1, rgb(170, 30, 30), false); break;
         case O_SKULLPOLE: rect(7, 10, 2, 21, rgb(70, 50, 40)); ell(8, 9, 3, 3, rgb(230, 220, 200)); P(7, 9, BLACK); P(9, 9, BLACK); line(4, 6, 6, 8, rgb(230, 220, 200)); line(12, 6, 10, 8, rgb(230, 220, 200)); break;
         case O_BONFIRE: for (int k = 0; k < 10; k++) { float a = k * 0.628f; ell(8 + std::cos(a) * 6.5f, 27 + std::sin(a) * 3, 1.6f, 1.3f, stone); } line(3, 29, 13, 24, dark); line(3, 24, 13, 29, dark); line(8, 23, 8, 30, dark); break;
+        case O_PUMP: rect(3, 20, 10, 10, rgb(70, 110, 160)); rect(3, 20, 10, 2, rgb(110, 150, 200)); ell(8, 25, 2.5f, 2.5f, rgb(200, 200, 210)); rect(12, 26, 4, 2, rgb(150, 150, 160)); rect(6, 17, 4, 3, rgb(220, 130, 70)); break;
+        case O_DRIP: line(1, 28, 14, 28, rgb(60, 60, 64)); line(1, 29, 14, 29, rgb(40, 40, 44)); for (int x = 3; x < 14; x += 4) P(x, 30, rgb(120, 190, 255)); rect(6, 25, 3, 3, rgb(90, 90, 96)); break;
         default: rect(4, 20, 8, 8, MAGENTA);
     }
 }
@@ -414,6 +475,26 @@ static void drawEnt(int kind, int frame, int look) {
             break;
         }
         case E_FROG: ell(12, 19, 3, 2.2f, rgb(80, 160, 70)); P(10, 17, rgb(240, 240, 120)); P(13, 17, rgb(240, 240, 120)); rect(8, 20, 2, 1, rgb(60, 120, 50)); rect(14, 20, 2, 1, rgb(60, 120, 50)); break;
+        case E_PORCUPINE: {
+            Color c = rgb(92, 72, 56);
+            rect(8 + (f == 1), 19, 2, 3, mul(c, 0.7f)); rect(13 - (f == 1), 19, 2, 3, mul(c, 0.7f));
+            ell(11, 16, 6, 4.5f, c);
+            for (int k = 0; k < 9; k++) {   // quills
+                float a = 3.4f + k * 0.33f;
+                line(11 + (int)(std::cos(a) * 3), 16 + (int)(std::sin(a) * 2), 11 + (int)(std::cos(a) * 8), 16 + (int)(std::sin(a) * 7), k % 2 ? rgb(225, 215, 195) : rgb(70, 56, 46));
+            }
+            ell(17, 18, 2.2f, 2, rgb(110, 90, 70)); P(18, 17, BLACK); P(19, 18, rgb(40, 30, 30));
+            break;
+        }
+        case E_COYOTE: {
+            Color c = look % 2 ? rgb(185, 155, 115) : rgb(160, 135, 100);
+            legs(7, 13, 16, 6, f, mul(c, 0.8f));
+            ell(11, 14, 5.5f, 3, c); ell(9, 13, 2.5f, 2, rgb(220, 205, 180));
+            ell(17, 11, 2.6f, 2.3f, c); rect(19, 12, 3, 1, mul(c, 0.85f)); P(21, 12, BLACK); P(18, 10, rgb(230, 200, 60));
+            line(16, 9, 15, 5, mul(c, 0.7f)); line(18, 9, 18, 5, mul(c, 0.7f));   // big ears
+            line(5, 14, 2, 17, mul(c, 0.9f)); P(2, 18, rgb(40, 34, 30));
+            break;
+        }
         case E_SPIDER: ell(12, 19, 2, 1.6f, rgb(50, 40, 40)); for (int k = 0; k < 4; k++) { line(11, 19, 8 - (f == 1 ? 1 : 0), 17 + k, rgb(40, 30, 30)); line(13, 19, 16 + (f == 2 ? 1 : 0), 17 + k, rgb(40, 30, 30)); } break;
         case E_WORKER: {
             Color shirts[4] = {rgb(90, 130, 190), rgb(170, 110, 60), rgb(120, 160, 90), rgb(190, 170, 110)};

@@ -37,29 +37,37 @@ Saves go to `hearthland.sav` in the working directory. The game autosaves every 
 
 ## How the world works
 
-- **Day/night and seasons.** A day lasts 8 real minutes and each season 7 days. Nights and winters
-  are cold enough to kill you. Warm up by a fire or indoors (any area fully enclosed by walls and
-  doors), and wear fur or wool clothing.
-- **Food spoils.** Food rots in your pack. Granaries and root cellars slow it down, and a powered
-  cold store nearly stops it. Chests left outdoors in the rain go damp, and mold spreads.
-- **Farming.** Till, plant and water. Frost in late autumn kills unharvested crops, except
-  frost-hardy cabbage. Each harvest drains the soil. Manure, compost, and beans grown in rotation
-  restore it.
-- **No pesticides.** Insects build up in large single-crop fields. Ponds attract frogs, leaf piles
-  attract spiders, and tame ducks and fowl eat pests.
-- **Animals.** Sheep (wool), buffalo (milk), ducks and jungle fowl (eggs), horses (riding), and dogs
-  (guards). Wolves hunt livestock at night, and bears roam the forests. Livestock breed and drop
-  manure, and need hay in troughs during winter.
-- **Tribes.** Trading villages fly banners and have a trader marked with **$**. Raider camps are
-  marked with skulls and red war paint, and they raid once your farm grows. Connect a trading
-  village to a trading post with road for better prices. Recruit workers who farm, cut wood, herd,
-  cook and guard. They need an indoor bed, food in storage and water.
-- **Disasters.** Lightning wildfires, which spread through trees, so keep a firebreak around
-  buildings. Also spring floods, droughts, heatwaves, blizzards and insect swarms.
-- **Dams** stop spring floods and power water wheels, but their reservoir permanently drowns the low
-  land upstream.
-- **Power.** Water wheels, solar panels and biogas digesters feed batteries, lamps, heaters,
-  sprinklers and cold stores.
+- **One endless growing season.** There's no winter, so you can build at your own pace. A day lasts 8 real
+  minutes and a week is 7 days. Nights are cool and storms soak you, so fire, shelter and clothes matter.
+- **Soil (N/P/K).** Every crop drains nitrogen, phosphorus and potassium differently, and yield follows the
+  scarcest one. Hoe green manures under to restore it: beans fix N, buckwheat mines P and K, and mustard
+  suppresses pests. Compost (better with a ~30:1 carbon:nitrogen mix), manure, wood ash and flood silt all
+  help. Penned chickens leave droppings that feed the soil once you till them in. Free-range birds eat
+  unfenced crops.
+- **Crops.** Wheat, potatoes (find them wild, plant a potato), cabbage, beans, tomatoes, winter squash,
+  green beans, buckwheat and mustard.
+- **Orchards.** Trees mature in one week and fruit every week after. Apple seeds produce random varieties
+  (size, colour, nutrition). Cut a scion from a tree you like and graft it onto a sapling to keep the
+  variety. There are also pears, apricots, grapes, raspberries and blackberries.
+- **No pesticides.** Ponds (frogs), leaf piles and compost (spiders, wasps), bird houses, mountain ash,
+  wildflowers and poultry keep pests down. Bees boost seed and fruit yields and spread wildflowers.
+- **Food spoils.** Granaries and root cellars slow spoilage, and a powered cold store nearly stops it.
+  Chests left in the rain go mouldy.
+- **Animals.** Sheep, buffalo, ducks, jungle fowl, horses and dogs can be tamed. Wolves hunt livestock,
+  coyotes chew irrigation lines, porcupines ring-bark deciduous trees (wire tree guards stop them), and
+  bears roam the woods.
+- **Tribes.** Trading villages fly banners and have a trader marked **$**. Raider camps have skulls and
+  war paint. Roads to a trading post improve prices. Recruit workers as farmers, woodcutters, herders,
+  cooks, guards, repairers, miners or fishers. Workers need a bed, water and food, and a varied diet plus a
+  beautiful farm (native trees, ponds, flowers, a waterfall) make them work faster.
+- **Water.** Fields near rivers stay damp. Farther out you need wells (1.5 bar) or electric pumps
+  (4.5 bar) feeding sprinklers and drip lines. Every device uses pressure, and timers schedule them.
+- **Power.** Solar panels (weak at dawn and dusk, nothing at night), water wheels by a dam, and biogas
+  charge 10 kWh battery banks. Machines draw from the bank within 8 tiles, by priority.
+- **Materials.** Copper, iron ore, quartz to silicon, and sand to glass, all refined in a kiln. Mines dug
+  into rocky ground and worked by miners supply ore.
+- **Disasters.** Lightning wildfires, storm floods (dams stop them but flood land upstream), droughts,
+  heatwaves and insect swarms.
 
 ## Code layout
 
@@ -79,5 +87,7 @@ Saves go to `hearthland.sav` in the working directory. The game autosaves every 
 
 ```sh
 ./build/hearthland --soak 40 --seed 7     # build a test farm, fast-forward 40 days, print daily stats
-./build/hearthland --shot out.png --farm --tod 0.9 --day 23 --panel inv   # screenshot and exit
+./build/hearthland --shot out.png --farm --tod 0.9 --panel inv   # screenshot and exit
+./build/hearthland --powertest      # battery charge curve
+./build/hearthland --watertest      # irrigation pressure, leaks, coyotes vs. a repairer
 ```

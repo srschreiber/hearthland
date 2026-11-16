@@ -1,13 +1,23 @@
 // Player, animals and people.
 #include "game.h"
 #include <algorithm>
+#include <unordered_map>
 
 static const char* NAMES[] = {"Ada", "Bram", "Cora", "Dov", "Esme", "Finn", "Gwen", "Hale", "Iris", "Joss", "Kira", "Lio",
                               "Mara", "Nils", "Oona", "Pell", "Quin", "Rhea", "Sol", "Tam", "Ugo", "Vera", "Wren", "Yara"};
 
 static bool byPlayer = false;
 
-static bool isTree(uint8_t o) { return o == O_OAK || o == O_PINE || o == O_BIRCH; }
+// Tiles a worker recently failed to reach; planners skip them for a while.
+static std::unordered_map<int, float> unreachableUntil;
+static bool unreachable(int x, int y) {
+    if (!inb(x, y)) return false;
+    auto it = unreachableUntil.find(IDX(x, y));
+    return it != unreachableUntil.end() && it->second > g->totalTime && it->second - g->totalTime < 1000;
+}
+
+
+static bool isTree(uint8_t o) { return isTreeObj(o); }
 static Stack& held() { return g->pl.inv[g->pl.sel]; }
 static int heldTool() { return held().id ? ITEMS[held().id].tool : T_NONE; }
 
@@ -22,8 +32,9 @@ static bool blockedAt(float x, float y, float r, int who) {
 // returns false if movement was blocked on both axes
 static bool moveBody(float& x, float& y, float dx, float dy, int who, float r = 0.28f) {
     bool moved = false;
-    if (dx != 0) { if (!blockedAt(x + dx, y, r, who)) { x += dx; moved = true; } }
-    if (dy != 0) { if (!blockedAt(x, y + dy, r, who)) { y += dy; moved = true; } }
+    bool stuck = blockedAt(x, y, r * 0.5f, who);   // already inside something solid: let it walk out
+    if (dx != 0) { if (stuck || !blockedAt(x + dx, y, r, who)) { x += dx; moved = true; } }
+    if (dy != 0) { if (stuck || !blockedAt(x, y + dy, r, who)) { y += dy; moved = true; } }
     // unstick if somehow inside a solid tile
     if (blockedAt(x, y, r * 0.5f, who) && !moved) {
         x += rndr(-0.05f, 0.05f); y += rndr(-0.05f, 0.05f);
@@ -315,10 +326,20 @@ void updatePlayer(float dt) {
         // wake at dawn
         if (g->tod > 0.27f && g->tod < 0.6f) {
             p.sleeping = false;
-            logMsg("Good morning. Day " + std::to_string(g->day + 1) + ", " + SEASON_NAMES[g->season()] + ".", Color{255, 240, 200, 255});
+            logMsg("Good morning. Day " + std::to_string(g->day + 1) + ".", Color{255, 240, 200, 255});
         }
     }
 
+    if (p.fishing) {
+        if (heldTool() != T_ROD || IsKeyDown(KEY_W) || IsKeyDown(KEY_A) || IsKeyDown(KEY_S) || IsKeyDown(KEY_D)) p.fishing = false;
+        else if (p.biteTimer > 0) {
+            p.biteTimer -= dt;
+            if (p.biteTimer <= 0) { p.fishing = false; floatText(p.bobX + 0.5f, p.bobY, "It got away...", LIGHTGRAY); }
+        } else if ((p.fishTimer -= dt) <= 0) {
+            p.biteTimer = 1.1f;
+            floatText(p.bobX + 0.5f, p.bobY - 0.5f, "!", YELLOW);
+        }
+    }
     int px = (int)p.x, py = (int)p.y;
     for (int y = py - 12; y <= py + 12; y++)
         for (int x = px - 16; x <= px + 16; x++)
@@ -374,6 +395,18 @@ static bool canPlace(int item, int tx, int ty, std::string& why) {
         return true;
     }
     if (water) { why = "Can't build on water"; return false; }
+    if (o == O_SPRINKLER || o == O_DRIP || o == O_WATERFALL) {
+        bool src = false;
+        for (int y = ty - 8; y <= ty + 8 && !src; y++)
+            for (int x = tx - 8; x <= tx + 8; x++)
+                if (inb(x, y) && (g->tiles[IDX(x, y)].obj == O_WELL || g->tiles[IDX(x, y)].obj == O_PUMP) && dist(x, y, tx, ty) <= 8) { src = true; break; }
+        if (!src) { why = "Needs a well or pump within 8 tiles"; return false; }
+    }
+    if (o == O_PUMP) {
+        bool wet = false;
+        for (int k = -1; k <= 1; k++) for (int j = -1; j <= 1; j++) if (isWater(tx + j, ty + k) || (inb(tx + j, ty + k) && g->tiles[IDX(tx + j, ty + k)].obj == O_POND)) wet = true;
+        if (!wet) { why = "Pumps go beside water or a pond"; return false; }
+    }
     if (o == O_WHEEL) {
         bool riv = false;
         for (int k = -1; k <= 1; k++) for (int j = -1; j <= 1; j++) if (isWater(tx + j, ty + k)) riv = true;
@@ -404,7 +437,16 @@ static void place(int tx, int ty) {
         if (d.placeObj == O_COOP)
             for (auto& e : g->ents) if (e.alive && e.tame && (e.kind == E_DUCK || e.kind == E_FOWL) && dist(e.x, e.y, tx, ty) < 14) { e.homeX = tx + 0.5f; e.homeY = ty + 1.5f; }
         if (d.placeObj == O_TRADEPOST) checkRoads();
+        if (isFruitPlant((uint8_t)d.placeObj)) g->fruitState[i] = 2;   // fruits after one cycle
         if (d.placeObj == O_DAM) fillReservoir(tx, ty);
+        if (d.placeObj == O_SPRINKLER || d.placeObj == O_DRIP || d.placeObj == O_WATERFALL) floatText(tx + 0.5f, ty - 1, "Runs constantly - fit an irrigation timer to schedule it", SKYBLUE);
+        if (d.placeObj == O_MINE && g->ground[i] != G_STONE) floatText(tx + 0.5f, ty - 1, "Poor ground - mines in rocky hills yield far more", ORANGE);
+        if (isPowerObj((uint8_t)d.placeObj) && d.placeObj != O_BATTERY) {
+            bool bank = false;
+            for (int i = 0; i < WW * WH && !bank; i++)
+                if (g->tiles[i].obj == O_BATTERY && dist(tx, ty, i % WW, i / WW) <= 8.f) bank = true;
+            if (!bank) floatText(tx + 0.5f, ty - 1, "Not wired: needs a battery bank within 8 tiles", ORANGE);
+        }
     }
     burst(tx + 0.5f, ty + 0.5f, Color{200, 180, 140, 255}, 6);
     if (--h.n <= 0) h = Stack{};
@@ -417,11 +459,36 @@ static void gatherObject(int tx, int ty) {
     int tool = heldTool();
     Player& p = g->pl;
     p.useAnim = 0.2f;
-    auto hit = [&](int dmg) { t.hp -= dmg; burst(tx + 0.5f, ty + 0.5f, Color{180, 160, 120, 255}, 3, 0.6f); return t.hp <= 0; };
+    int power = 1;
+    if (held().id == I_IRONAXE || held().id == I_IRONPICK) power = 2;
+    auto hit = [&](int dmg) { dmg *= (dmg > 1 ? power : 1); t.hp -= dmg; burst(tx + 0.5f, ty + 0.5f, Color{180, 160, 120, 255}, 3, 0.6f); return t.hp <= 0; };
     switch (o) {
-        case O_OAK: case O_PINE: case O_BIRCH:
+        case O_GRAPEVINE: case O_BLACKBERRY: case O_RASPBERRY:
+            if (!harvestFruit(tx, ty, false, 0, 0)) floatText(tx + 0.5f, ty, g->fruitState[i] == 2 ? "Already picked this year" : "Not ripe yet", LIGHTGRAY);
+            break;
+        case O_IRONORE: case O_QUARTZ:
+            if (tool != T_PICK) { floatText(tx + 0.5f, ty, "Need a pickaxe", LIGHTGRAY); return; }
+            if (hit(3)) {
+                addToPlayer(o == O_IRONORE ? I_IRONORE : I_QUARTZ, rndi(2, 3)); addToPlayer(I_STONE, 1);
+                floatText(tx + 0.5f, ty, o == O_IRONORE ? "+Iron ore" : "+Quartz", WHITE);
+                removeObject(tx, ty, false);
+            }
+            break;
+        case O_WILDPOTATO: { int n = rndi(2, 4); addToPlayer(I_POTATO, n); floatText(tx + 0.5f, ty, "+" + std::to_string(n) + " Potatoes (plant one to grow more)", Color{230, 200, 150, 255}); removeObject(tx, ty, false); break; }
+        case O_APPLE: case O_PEAR: case O_APRICOT:
             if (tool != T_AXE) {
-                if (rnd() < 0.35f) { addToPlayer(I_STICK, 1); floatText(tx + 0.5f, ty - 1, "+1 Stick", WHITE); }
+                if (!harvestFruit(tx, ty, false, 0, 0)) floatText(tx + 0.5f, ty - 1, g->fruitState[i] == 2 ? "Already picked this year" : "No ripe fruit", LIGHTGRAY);
+                p.atkCD = 0.4f;
+                return;
+            }
+            [[fallthrough]];
+        case O_OAK: case O_PINE: case O_BIRCH: case O_MAPLE: case O_MTNASH: case O_ASPEN: case O_SERVICEBERRY:
+            if (tool != T_AXE) {
+                if (o == O_SERVICEBERRY && g->season() == 1 && t.timer <= 0) {
+                    addToPlayer(I_BERRIES, 3); t.timer = 1;   // picked for this season
+                    floatText(tx + 0.5f, ty - 1, "+3 Serviceberries", Color{200, 120, 220, 255});
+                }
+                else if (rnd() < 0.35f) { addToPlayer(I_STICK, 1); floatText(tx + 0.5f, ty - 1, "+1 Stick", WHITE); }
                 else if (rnd() < 0.4f) { addToPlayer(I_LEAVES, 1); floatText(tx + 0.5f, ty - 1, "+1 Leaves", WHITE); }
                 else floatText(tx + 0.5f, ty - 1, "Need an axe to fell", LIGHTGRAY);
                 p.atkCD = 0.5f;
@@ -431,7 +498,7 @@ static void gatherObject(int tx, int ty) {
             if (hit(2)) {
                 int w = rndi(4, 6);
                 addToPlayer(I_WOOD, w); addToPlayer(I_LEAVES, 2); addToPlayer(I_STICK, 1);
-                if (rnd() < 0.6f) addToPlayer(I_SAPLING, 1);
+                if (rnd() < 0.6f) addToPlayer(saplingFor(o), 1);
                 floatText(tx + 0.5f, ty - 1, "+" + std::to_string(w) + " Wood", WHITE);
                 removeObject(tx, ty, false);
                 placeObject(tx, ty, O_STUMP);
@@ -497,6 +564,7 @@ static void attackEnt(Ent& e) {
     Player& p = g->pl;
     int tool = heldTool();
     float dmg = tool == T_SPEAR ? 17 : tool == T_AXE ? 10 : tool == T_PICK ? 8 : 4;
+    if (e.kind == E_PORCUPINE && tool != T_SPEAR) { hurtPlayer(4, "porcupine quills"); floatText(p.x, p.y - 1, "Ouch! Quills - use a spear", ORANGE); }
     byPlayer = true;
     damageEnt(e, dmg, p.x, p.y);
     byPlayer = false;
@@ -538,10 +606,30 @@ void playerUseAt(int tx, int ty, Vector2 wm) {
     Crop& c = g->crops[i];
     switch (tool) {
         case T_HOE:
+            if ((gr == G_TILLED || gr == G_GREENHOUSE) && c.type) {
+                bool gm = c.type == CR_BEANS || c.type == CR_GREENBEAN || c.type == CR_BUCKWHEAT || c.type == CR_MUSTARD;
+                floatText(tx + 0.5f, ty, c.dead ? "Dead crop hoed under" : gm ? "Green manure hoed under - soil enriched" : "Crop hoed under", Color{190, 150, 100, 255});
+                plowUnder(tx, ty);
+                return;
+            }
+            if (t.obj == O_ASH) {   // wood ash: potassium and a little phosphorus
+                removeObject(tx, ty, false);
+                addNutrients(i, 0.0f, 0.05f, 0.2f);
+                if (gr == G_GRASS || gr == G_DIRT || gr == G_FOREST || gr == G_BURNT) g->ground[i] = G_TILLED;
+                floatText(tx + 0.5f, ty, "Wood ash worked in (+K)", Color{190, 190, 190, 255});
+                return;
+            }
             if (gr == G_SAND && !t.obj) { addToPlayer(I_SAND, 1); floatText(tx + 0.5f, ty, "+Sand", WHITE); return; }
+            if ((gr == G_TILLED || gr == G_GREENHOUSE) && !c.type && g->litter[i] > 0.01f) {
+                tillInLitter(i);
+                floatText(tx + 0.5f, ty, "Manure tilled in - soil enriched", Color{190, 150, 100, 255});
+                burst(tx + 0.5f, ty + 0.5f, Color{120, 80, 50, 255}, 6);
+                return;
+            }
             if ((gr == G_GRASS || gr == G_DIRT || gr == G_FOREST || gr == G_BURNT) && (!t.obj || t.obj == O_TALLGRASS || t.obj == O_ASH)) {
                 if (t.obj) removeObject(tx, ty, false);
                 g->ground[i] = G_TILLED;
+                tillInLitter(i);
                 burst(tx + 0.5f, ty + 0.5f, Color{120, 80, 50, 255}, 6);
                 return;
             }
@@ -567,6 +655,57 @@ void playerUseAt(int tx, int ty, Vector2 wm) {
             break;
         default: break;
     }
+    // orchard work: cut a scion with shears, graft it onto a sapling, wire-guard trees, fit timers
+    if (tool == T_SHEARS && isFruitTree(t.obj) && g->fruitGene[i] >= 0) {
+        int left = addItem(p.inv, INV_SLOTS, I_SCION, 1, (float)g->fruitGene[i]);   // the scion carries its variety id
+        if (left) floatText(tx + 0.5f, ty, "No room for the scion", LIGHTGRAY);
+        else logMsg("Cut a scion: " + geneDesc(g->fruitGene[i]) + ". Use it on a sapling to graft.", Color{200, 230, 160, 255});
+        p.atkCD = 0.6f;
+        return;
+    }
+    if (h.id == I_SCION && t.obj == O_SAPLING) {
+        int gene = (int)h.fresh;
+        if (gene < 0 || gene >= (int)g->genes.size()) return;
+        g->fruitGene[i] = gene;
+        t.var = (uint8_t)((t.var & ~0x1C) | (5 << 2));
+        logMsg("Grafted! This sapling will grow into: " + geneDesc(gene), Color{200, 240, 160, 255});
+        burst(tx + 0.5f, ty + 0.5f, Color{140, 220, 120, 255}, 8);
+        h = Stack{};
+        return;
+    }
+    if (h.id == I_TREEGUARD && (isTreeObj(t.obj) || t.obj == O_SAPLING)) {
+        if (t.var & VAR_GUARD) { floatText(tx + 0.5f, ty, "Already guarded", LIGHTGRAY); return; }
+        t.var |= VAR_GUARD;
+        floatText(tx + 0.5f, ty, "Wire guard fitted", Color{200, 200, 210, 255});
+        if (--h.n <= 0) h = Stack{};
+        return;
+    }
+    if (h.id == I_TIMER && (t.obj == O_SPRINKLER || t.obj == O_DRIP || t.obj == O_WATERFALL)) {
+        if (t.var & VAR_TIMER) { floatText(tx + 0.5f, ty, "Already has a timer", LIGHTGRAY); return; }
+        t.var |= VAR_TIMER;
+        t.timer = 3;
+        floatText(tx + 0.5f, ty, "Timer fitted - right-click to set schedule", SKYBLUE);
+        if (--h.n <= 0) h = Stack{};
+        return;
+    }
+    // fishing
+    if (tool == T_ROD) {
+        if (!isWater(tx, ty) || dist(p.x, p.y, tx + 0.5f, ty + 0.5f) > 5) { floatText(tx + 0.5f, ty, "Cast into water", LIGHTGRAY); return; }
+        if (p.fishing && p.biteTimer > 0) {
+            p.fishing = false; p.biteTimer = 0;
+            int n = rnd() < 0.2f ? 2 : 1;
+            addToPlayer(I_FISH, n);
+            g->stats.foodMade += ITEMS[I_FISH].food * n;
+            floatText(tx + 0.5f, ty, g->river[i] ? "Caught a trout!" : "Caught a whitefish!", Color{170, 210, 255, 255});
+            burst(tx + 0.5f, ty + 0.5f, Color{170, 210, 255, 255}, 8);
+        } else if (p.fishing) { p.fishing = false; floatText(tx + 0.5f, ty, "Reeled in too early", LIGHTGRAY); }
+        else {
+            p.fishing = true; p.bobX = tx; p.bobY = ty;
+            p.fishTimer = rndr(3, 10) * (g->season() == 3 ? 1.6f : 1.f) * (g->tod > 0.75f || g->tod < 0.3f ? 0.7f : 1.f);   // fish bite at dawn and dusk
+        }
+        p.atkCD = 0.3f;
+        return;
+    }
     // seeds & soil items
     if (h.id) {
         int crop = 0;
@@ -583,13 +722,20 @@ void playerUseAt(int tx, int ty, Vector2 wm) {
             return;
         }
         if ((h.id == I_COMPOST || h.id == I_MANURE) && (gr == G_TILLED || gr == G_GREENHOUSE)) {
-            g->fert[i] = std::min(1.4f, g->fert[i] + (h.id == I_COMPOST ? 0.4f : 0.2f));
+            if (h.id == I_COMPOST) addNutrients(i, 0.1f + 0.2f * h.fresh, 0.08f + 0.15f * h.fresh, 0.08f + 0.15f * h.fresh);
+            else addNutrients(i, 0.2f, 0.06f, 0.08f);
             floatText(tx + 0.5f, ty, "Fertilized", Color{180, 140, 90, 255});
             if (--h.n <= 0) h = Stack{};
             return;
         }
-        if (h.id == I_SAPLING && !t.obj && (gr == G_GRASS || gr == G_FOREST || gr == G_DIRT || gr == G_BURNT)) {
+        bool sapling = h.id == I_SAPLING || h.id == I_SAP_MAPLE || h.id == I_SAP_ASH || h.id == I_SAP_ASPEN || h.id == I_SAP_SERVICE ||
+                       h.id == I_APPLESEED || h.id == I_SAP_PEAR || h.id == I_SAP_APRICOT;
+        if (sapling && !t.obj && (gr == G_GRASS || gr == G_FOREST || gr == G_DIRT || gr == G_BURNT || gr == G_TILLED)) {
             placeObject(tx, ty, O_SAPLING);
+            t.var = (uint8_t)((t.var & 3) | (treeForSapling(h.id) << 2));
+            if (h.id == I_APPLESEED) { g->fruitGene[i] = newGene(FK_APPLE, true); floatText(tx + 0.5f, ty - 1, "A new apple variety - who knows what it'll be?", Color{240, 200, 150, 255}); }
+            if (h.id == I_SAP_PEAR) g->fruitGene[i] = newGene(FK_PEAR, false);
+            if (h.id == I_SAP_APRICOT) g->fruitGene[i] = newGene(FK_APRICOT, false);
             if (--h.n <= 0) h = Stack{};
             return;
         }
@@ -666,6 +812,19 @@ void playerInteractAt(int tx, int ty, Vector2 wm) {
                 p.sleeping = true; p.x = tx + 0.5f; p.y = ty + 0.5f;
                 return;
             }
+            case O_SPRINKLER: case O_DRIP: case O_WATERFALL: {
+                if (lineBroken(t)) { repairLine(tx, ty); floatText(tx + 0.5f, ty, "Line repaired", SKYBLUE); return; }
+                if (t.var & VAR_TIMER) t.timer = (float)(((int)t.timer + 1) % 5);
+                else t.timer = (int)t.timer == 4 ? 0.f : 4.f;   // without a timer it's just a valve
+                floatText(tx + 0.5f, ty, (t.var & VAR_TIMER) ? std::string("Timer: ") + timerName((int)t.timer) : std::string((int)t.timer == 4 ? "Valve closed" : "Valve open (fit a timer to schedule)"), SKYBLUE);
+                return;
+            }
+            case O_BEEHIVE: {
+                int n = collectHoney(tx, ty);
+                if (n) { addToPlayer(I_HONEY, n); g->stats.foodMade += ITEMS[I_HONEY].food * n; floatText(tx + 0.5f, ty, "+" + std::to_string(n) + " Honey", Color{250, 200, 60, 255}); }
+                else floatText(tx + 0.5f, ty, (t.var & VAR_BEES) ? "Honey not ready yet" : "No bees yet - plant flowers nearby", LIGHTGRAY);
+                return;
+            }
             case O_WELL: p.water = 100; if (heldTool() == T_BUCKET) h.id = I_WATERBUCKET; floatText(tx + 0.5f, ty, "Fresh water", SKYBLUE); return;
             case O_WORKBENCH: case O_KILN: case O_LOOM: case O_TANNER: case O_DRYRACK: case O_CAMPFIRE: openPanel(P_INV); return;
             case O_TRADEPOST:
@@ -703,8 +862,9 @@ static Ent* nearestEnt(float x, float y, float r, bool (*pred)(const Ent&)) {
 }
 static bool isPredator(const Ent& e) { return e.kind == E_WOLF || (e.kind == E_BEAR && !e.sleeping); }
 static bool isLivestock(const Ent& e) { return e.tame && SPECIES[e.kind].livestock && e.kind != E_HORSE; }
-static bool isEnemyOfFarm(const Ent& e) { return e.kind == E_WOLF || (e.kind == E_RAIDER && e.state >= 1) || (e.kind == E_BEAR && e.state == 9); }
+static bool isEnemyOfFarm(const Ent& e) { return e.kind == E_WOLF || e.kind == E_COYOTE || e.kind == E_PORCUPINE || (e.kind == E_RAIDER && e.state >= 1) || (e.kind == E_BEAR && e.state == 9); }
 static bool isGuardDog(const Ent& e) { return e.kind == E_DOG && e.tame; }
+static bool isWorkerEnt(const Ent& e) { return e.kind == E_WORKER; }
 static bool isFarmPerson(const Ent& e) { return e.kind == E_WORKER || (e.kind == E_DOG && e.tame); }
 
 static bool playerHoldsLiked(int kind) {
@@ -799,14 +959,17 @@ static void melee(Ent& e, Ent* target, bool hitPlayer, float dt) {
     e.timer2 = e.kind == E_BEAR ? 1.4f : 1.0f;
     float dmg = SPECIES[e.kind].dmg;
     if (hitPlayer) hurtPlayer(dmg, (std::string("killed by a ") + SPECIES[e.kind].name).c_str());
-    else if (target) damageEnt(*target, dmg, e.x, e.y);
+    else if (target) {
+        damageEnt(*target, dmg, e.x, e.y);
+        if (target->kind == E_PORCUPINE) damageEnt(e, 3, target->x, target->y);   // a mouthful of quills
+    }
 }
 
 // food an animal will take from a trough (or, for dogs, from storage)
 static bool eatsItem(int kind, int id) {
     bool meat = id == I_RAWMEAT || id == I_JERKY || id == I_COOKEDMEAT;
     if (!SPECIES[kind].herbivore) return meat;
-    return id == I_HAY || id == I_WHEAT || id == I_CABBAGE || id == I_BERRIES || id == I_WHEATSEED || id == I_BEANS;
+    return id == I_HAY || id == I_WHEAT || id == I_CABBAGE || id == I_BERRIES || id == I_WHEATSEED || id == I_BEANS || id == I_APPLE_SPITTER || id == I_SQUASH;
 }
 
 static bool eatFrom(Ent& e, Container& c) {
@@ -825,17 +988,23 @@ static bool seekFeed(Ent& e, float dt) {
     int best = -1; float bd = 14;
     for (size_t i = 0; i < g->conts.size(); i++) {
         Container& c = g->conts[i];
-        bool ok = c.alive && (c.kind == C_TROUGH || (e.kind == E_DOG && (c.kind == C_CHEST || c.kind == C_GRANARY || c.kind == C_CELLAR)));
+        bool poultry = e.kind == E_DUCK || e.kind == E_FOWL;
+        bool ok = c.alive && (c.kind == C_TROUGH || (e.kind == E_DOG && (c.kind == C_CHEST || c.kind == C_GRANARY || c.kind == C_CELLAR)) || (poultry && c.kind == C_COMPOST));
         if (!ok) continue;
         bool has = false;
-        for (auto& s : c.slots) if (s.id && eatsItem(e.kind, s.id)) { has = true; break; }
+        if (c.kind == C_COMPOST) { int items = 0; compostRatio(c, &items); has = items >= 2; }   // larvae
+        else for (auto& s : c.slots) if (s.id && eatsItem(e.kind, s.id)) { has = true; break; }
         if (!has) continue;
         float d = dist(e.x, e.y, c.x + 0.5f, c.y + 0.5f);
         if (d < bd) { bd = d; best = (int)i; }
     }
     if (best < 0) return false;
     Container& c = g->conts[best];
-    if (bd < 1.6f) { eatFrom(e, c); return false; }
+    if (bd < 1.6f) {
+        if (c.kind == C_COMPOST) { e.hunger = std::min(100.f, e.hunger + dt * 25); return e.hunger < 95; }   // pecking larvae
+        eatFrom(e, c);
+        return false;
+    }
     chase(e, c.x + 0.5f, c.y + 0.5f, SPECIES[e.kind].speed * 0.6f, dt, false);
     return true;
 }
@@ -884,6 +1053,28 @@ static void tameNeeds(Ent& e, float dt) {
             if (inb(tx, ty) && !g->tiles[IDX(tx, ty)].obj && !g->crops[IDX(tx, ty)].type && !isWater(tx, ty)) placeObject(tx, ty, O_MANURE);
         }
     }
+    // poultry: droppings build up wherever they're kept; free-ranging birds raid unfenced crops
+    if ((e.kind == E_FOWL || e.kind == E_DUCK) && inb(tx, ty) && !isWater(tx, ty)) {
+        g->litter[IDX(tx, ty)] = std::min(1.5f, g->litter[IDX(tx, ty)] + dt / DAY_SECONDS * (e.kind == E_FOWL ? 1.f : 0.6f));
+        for (int k = 0; k < 5; k++) {
+            int cx = tx + (k == 1) - (k == 2), cy = ty + (k == 3) - (k == 4);
+            if (!inb(cx, cy)) continue;
+            Crop& c = g->crops[IDX(cx, cy)];
+            if (!c.type || c.dead || e.hunger > 85 || dist(e.x, e.y, cx + 0.5f, cy + 0.5f) > 0.9f) continue;
+            c.growth -= dt * 0.08f;
+            e.hunger = std::min(100.f, e.hunger + dt * 4);
+            if (c.growth <= 0) {
+                c = Crop{};
+                g->stats.cropsLost++;
+                static float last = -1000;
+                if (g->totalTime - last > 60 || g->totalTime < last) {
+                    last = g->totalTime;
+                    logMsg("Your free-range birds are eating the crops! Fence the garden or pen the flock.", ORANGE);
+                }
+            }
+            break;
+        }
+    }
     if (e.baby) {
         e.age += dt / DAY_SECONDS;
         if (e.age > 3) { e.baby = false; e.maxhp = SPECIES[e.kind].hp; }
@@ -921,7 +1112,8 @@ static void updateAnimal(Ent& e, float dt) {
     if (e.id == p.riding) { tameNeeds(e, dt); return; }
     if (e.tame) tameNeeds(e, dt);
     if (!e.alive) return;
-    bool noPasture = !SPECIES[e.kind].herbivore || g->season() == 3 || g->snowCover >= 0.5f || e.hunger < 30;
+    bool noPasture = !SPECIES[e.kind].herbivore || g->season() == 3 || g->snowCover >= 0.5f || e.hunger < 30 ||
+                     ((e.kind == E_DUCK || e.kind == E_FOWL) && e.hunger < 60);   // poultry love a compost heap
     if (e.tame && !e.follow && e.hunger < 45 && noPasture && e.kind != E_FROG && e.kind != E_SPIDER) {
         bool threatened = nearestEnt(e.x, e.y, 6, isPredator) != nullptr;
         if (!threatened && seekFeed(e, dt)) return;
@@ -985,6 +1177,80 @@ static void updateAnimal(Ent& e, float dt) {
             wander(e, dt, 10, spd * 0.4f);
             return;
         }
+        case E_PORCUPINE: {
+            // bark is winter food; the rest of the year they browse the undergrowth
+            // shuffle to the nearest living deciduous tree and strip its bark
+            if (e.tx < 0 || !inb(e.tx, e.ty) || !isDeciduous(g->tiles[IDX(e.tx, e.ty)].obj) || (g->tiles[IDX(e.tx, e.ty)].var & VAR_GUARD)) {
+                e.tx = -1;
+                float bd = 25;
+                for (int y = (int)e.y - 25; y <= (int)e.y + 25; y++)
+                    for (int x = (int)e.x - 25; x <= (int)e.x + 25; x++) {
+                        if (!inb(x, y)) continue;
+                        uint8_t o = g->tiles[IDX(x, y)].obj;
+                        if (!isDeciduous(o) || (g->tiles[IDX(x, y)].var & VAR_GUARD)) continue;
+                        float d = dist(e.x, e.y, x, y) - (g->ground[IDX(x, y)] != G_FOREST ? 8 : 0);   // orchards and shade trees first
+                        if (d < bd) { bd = d; e.tx = x; e.ty = y; }
+                    }
+                if (e.tx < 0) { wander(e, dt, 12, spd * 0.5f); return; }
+            }
+            if (dist(e.x, e.y, e.tx + 0.5f, e.ty + 0.5f) > 1.2f) { chase(e, e.tx + 0.5f, e.ty + 0.5f, spd, dt, false); return; }
+            e.timer2 += dt;
+            e.anim += dt * 3;
+            if (e.timer2 > 120.f) {   // ring-barking takes ~1.5 days per tree
+                e.timer2 = 0;
+                Tile& t = g->tiles[IDX(e.tx, e.ty)];
+                if (--t.hp <= 0) {
+                    static float lastMsg = -1000;
+                    if (g->totalTime - lastMsg > 40 || g->totalTime < lastMsg) {
+                        lastMsg = g->totalTime;
+                        logMsg(std::string("A porcupine ring-barked a ") + OBJS[t.obj].name + " - the tree died. Hunt them down!", Color{220, 180, 120, 255});
+                    }
+                    removeObject(e.tx, e.ty, false);
+                    placeObject(e.tx, e.ty, O_STUMP);
+                    e.tx = -1;
+                }
+            }
+            return;
+        }
+        case E_COYOTE: {
+            if (e.state == 2) {
+                flee(e, p.x, p.y, spd, dt);
+                e.timer -= dt;
+                if (pd > 22 || e.timer < -40) e.alive = false;
+                return;
+            }
+            // timid: run from people, fire and dogs
+            if (pd < 6 || playerScary(e.x, e.y)) { flee(e, p.x, p.y, spd * 1.1f, dt); return; }
+            if (Ent* dog = nearestEnt(e.x, e.y, 7, isGuardDog)) { flee(e, dog->x, dog->y, spd * 1.1f, dt); return; }
+            Ent* w = nearestEnt(e.x, e.y, 7, isWorkerEnt);
+            if (w) { flee(e, w->x, w->y, spd, dt); return; }
+            // poultry first, otherwise chew the nearest intact irrigation line
+            Ent* bird = nearestEnt(e.x, e.y, 8, [](const Ent& o) { return o.tame && (o.kind == E_DUCK || o.kind == E_FOWL); });
+            if (bird) {
+                if (dist(e.x, e.y, bird->x, bird->y) < 0.9f) { melee(e, bird, false, dt); if (!bird->alive) e.state = 2; }
+                else chase(e, bird->x, bird->y, spd, dt, false);
+                return;
+            }
+            if (e.tx < 0 || !inb(e.tx, e.ty) || lineBroken(g->tiles[IDX(e.tx, e.ty)]) ||
+                (g->tiles[IDX(e.tx, e.ty)].obj != O_DRIP && g->tiles[IDX(e.tx, e.ty)].obj != O_SPRINKLER)) {
+                e.tx = -1;
+                float bd = 40;
+                for (int y = (int)e.y - 40; y <= (int)e.y + 40; y++)
+                    for (int x = (int)e.x - 40; x <= (int)e.x + 40; x++) {
+                        if (!inb(x, y)) continue;
+                        const Tile& t = g->tiles[IDX(x, y)];
+                        if ((t.obj != O_DRIP && t.obj != O_SPRINKLER) || lineBroken(t)) continue;
+                        float d = dist(e.x, e.y, x, y);
+                        if (d < bd) { bd = d; e.tx = x; e.ty = y; }
+                    }
+                if (e.tx < 0) { wander(e, dt, 10, spd * 0.4f); return; }
+            }
+            if (dist(e.x, e.y, e.tx + 0.5f, e.ty + 0.5f) > 0.9f) { chase(e, e.tx + 0.5f, e.ty + 0.5f, spd * 0.7f, dt, false); return; }
+            e.timer2 += dt;
+            e.anim += dt * 4;
+            if (e.timer2 > 4.f) { e.timer2 = 0; breakLine(e.tx, e.ty); e.tx = -1; if (rnd() < 0.8f) e.state = 2; }
+            return;
+        }
         case E_FROG: case E_SPIDER: {
             int ox, oy;
             if (!nearObj(e.homeX, e.homeY, e.kind == E_FROG ? O_POND : O_LEAFPILE, 1.5f, &ox, &oy)) { e.alive = false; return; }
@@ -1024,7 +1290,16 @@ static void updateAnimal(Ent& e, float dt) {
         if (e.follow) {
             if (pd > 2.2f) { if (pd > 25) { e.x = p.x; e.y = p.y; } else chase(e, p.x, p.y, std::max(spd, 3.5f) * (pd > 5 ? 1.3f : 0.9f), dt, false); }
             else wander(e, dt, 1.5f, spd * 0.3f);
-        } else wander(e, dt, 5, spd * 0.4f);
+        } else {
+            if ((e.kind == E_FOWL || e.kind == E_DUCK) && e.hunger < 85 && rnd() < dt * 0.3f) {
+                // scratch toward any crop in reach - only fences stop them
+                for (int k = 0; k < 12; k++) {
+                    int cx = (int)e.x + rndi(-6, 6), cy = (int)e.y + rndi(-6, 6);
+                    if (inb(cx, cy) && g->crops[IDX(cx, cy)].type && !g->crops[IDX(cx, cy)].dead) { e.vx = cx + 0.5f - e.x; e.vy = cy + 0.5f - e.y; float L = std::sqrt(e.vx * e.vx + e.vy * e.vy); if (L > 0) { e.vx /= L; e.vy /= L; } e.timer = 3; break; }
+                }
+            }
+            wander(e, dt, 5, spd * 0.4f);
+        }
         return;
     }
     float fleeR = e.kind == E_HORSE ? 6.f : (e.kind == E_BUFFALO ? 3.f : 4.5f);
@@ -1042,7 +1317,7 @@ static void updateAnimal(Ent& e, float dt) {
 
 // ---------------------------------------------------------------- people
 enum Task { TK_NONE, TK_EAT, TK_DRINK, TK_SLEEP, TK_DELIVER, TK_HARVEST, TK_PLANT, TK_WATER, TK_FERT, TK_TILL, TK_CHOP,
-            TK_REPLANT, TK_FILLTROUGH, TK_SHEAR, TK_MILK, TK_COLLECT, TK_COOK, TK_PATROL, TK_GOHOME, TK_CUTHAY };
+            TK_REPLANT, TK_FILLTROUGH, TK_SHEAR, TK_MILK, TK_COLLECT, TK_COOK, TK_PATROL, TK_GOHOME, TK_CUTHAY, TK_REPAIR, TK_PICK, TK_MINE, TK_FISH, TK_HONEY };
 
 static int findContWith(int id, float x, float y) {
     int best = -1; float bd = 1e9f;
@@ -1057,24 +1332,45 @@ static int findContWith(int id, float x, float y) {
 }
 
 static bool waterSource(float x, float y, int& wx, int& wy) {
-    if (nearObj(x, y, O_WELL, 40, &wx, &wy)) return true;
+    if (nearObj(x, y, O_WELL, 40, &wx, &wy) && !unreachable(wx, wy)) return true;
     float bd = 1e9f; bool found = false;
     for (int yy = (int)y - 25; yy <= (int)y + 25; yy++)
         for (int xx = (int)x - 25; xx <= (int)x + 25; xx++)
-            if (inb(xx, yy) && g->ground[IDX(xx, yy)] == G_WATER) {
+            if (inb(xx, yy) && g->ground[IDX(xx, yy)] == G_WATER && !unreachable(xx, yy)) {
                 float d = dist(x, y, xx, yy);
                 if (d < bd) { bd = d; wx = xx; wy = yy; found = true; }
             }
     return found;
 }
 
-static int bestFood(float x, float y, int& cont) {
-    static const int pref[] = {I_STEW, I_COOKEDMEAT, I_BREAD, I_JERKY, I_EGG, I_MILK, I_CABBAGE, I_POTATO, I_BERRIES, I_BEANS, I_WHEAT};
-    for (int id : pref) {
-        int c = findContWith(id, x, y);
-        if (c >= 0) { cont = c; return id; }
+static const int WORKER_FOODS[] = {I_STEW, I_COOKEDMEAT, I_COOKEDFISH, I_BREAD, I_HONEY, I_MUSTARDGREENS, I_APPLE_PRIZE, I_JERKY, I_EGG, I_MILK, I_SQUASH, I_TOMATO,
+                                   I_GREENBEANS, I_PEAR, I_APRICOT, I_GRAPES, I_APPLE, I_RASPBERRY, I_BLACKBERRY, I_CABBAGE, I_POTATO,
+                                   I_BERRIES, I_BEANS, I_APPLE_SPITTER, I_WHEAT};
+
+int dietVariety(const Ent& e) {
+    int n = 0;
+    for (int k = 0; k < 12; k++) {
+        if (!e.diet[k]) continue;
+        bool seen = false;
+        for (int j = 0; j < k; j++) if (e.diet[j] == e.diet[k]) seen = true;
+        if (!seen) n++;
     }
-    return 0;
+    return n;
+}
+
+// Workers rotate through what's in storage: the food they've had least recently wins, then preference.
+static int bestFood(float x, float y, int& cont, const Ent* who = nullptr) {
+    int best = 0, bestScore = 1 << 30;
+    for (int rank = 0; rank < (int)(sizeof(WORKER_FOODS) / sizeof(int)); rank++) {
+        int id = WORKER_FOODS[rank];
+        int c = findContWith(id, x, y);
+        if (c < 0 || unreachable(g->conts[c].x, g->conts[c].y)) continue;
+        int recent = 0;
+        if (who) for (int k = 0; k < 12; k++) if (who->diet[k] == id) recent++;
+        int score = recent * 100 + rank;
+        if (score < bestScore) { bestScore = score; best = id; cont = c; }
+    }
+    return best;
 }
 
 static void startTask(Ent& e, int task, int tx, int ty) {
@@ -1084,15 +1380,13 @@ static void startTask(Ent& e, int task, int tx, int ty) {
 }
 
 static bool someoneTargets(const Ent& self, int task, int x, int y) {
+    if (task != TK_SHEAR && task != TK_MILK && unreachable(x, y)) return true;
     for (auto& e : g->ents)
         if (e.alive && e.kind == E_WORKER && e.id != self.id && e.task == task && e.state == x && e.target == y) return true;
     return false;
 }
 
-static bool sprinklerCovers(int x, int y) {
-    if (!g->powered) return false;
-    return nearObj(x + 0.5f, y + 0.5f, O_SPRINKLER, 4.3f);
-}
+static bool sprinklerCovers(int x, int y) { return irrigationCovers(x, y); }
 
 // Would this crop ripen before the autumn frost? Farmers don't waste seed on crops that can't.
 static bool plantSeason(int crop, int i) {
@@ -1100,11 +1394,17 @@ static bool plantSeason(int crop, int i) {
     int s = g->season();
     if (s == 3) return false;
     if (s == 2) return CROPS[crop].hardy && g->dayOfSeason() < 5;
-    if (s == 1 && !CROPS[crop].hardy) {
-        float daysLeft = (DAYS_PER_SEASON - g->dayOfSeason()) + 2.5f;
-        return daysLeft > CROPS[crop].days * 1.3f;
-    }
     return true;
+}
+
+// Put compostable material in the nearest bin with room, otherwise in storage.
+static void toCompost(int id, int n, float x, float y) {
+    for (auto& c : g->conts) {
+        if (!c.alive || c.kind != C_COMPOST || dist(x, y, c.x, c.y) > 40) continue;
+        n = addItem(c.slots.data(), (int)c.slots.size(), id, n, 1);
+        if (n <= 0) return;
+    }
+    storeAnywhere(id, n, 1, x, y);
 }
 
 static void planFarmer(Ent& e, float bx, float by) {
@@ -1123,20 +1423,24 @@ static void planFarmer(Ent& e, float bx, float by) {
             float d = dist(e.x, e.y, x, y);
             if (c.type) {
                 if (c.dead) { if (d < dD && !someoneTargets(e, TK_HARVEST, x, y)) { dD = d; dead = i; } }
-                else if (c.growth >= 1) { if (d < dR && !someoneTargets(e, TK_HARVEST, x, y)) { dR = d; ripe = i; } }
+                else if (c.growth >= 1 || (c.manure && c.growth >= 0.8f)) { if (d < dR && !someoneTargets(e, TK_HARVEST, x, y)) { dR = d; ripe = i; } }
                 else if (g->moist[i] < 0.3f && !sprinklerCovers(x, y)) { if (d < dDry && !someoneTargets(e, TK_WATER, x, y)) { dDry = d; dry = i; } }
             } else if (!g->tiles[i].obj) {
                 emptyCount++;
-                if (g->fert[i] < 0.45f) { if (d < dP && !someoneTargets(e, TK_FERT, x, y)) { dP = d; poor = i; } }
+                if (soilMin(i) < 0.4f) { if (d < dP && !someoneTargets(e, TK_FERT, x, y)) { dP = d; poor = i; } }
                 if (d < dE && !someoneTargets(e, TK_PLANT, x, y)) { dE = d; empty = i; }
             }
         }
     if (ripe >= 0) { startTask(e, TK_HARVEST, ripe % WW, ripe / WW); return; }
+    for (int y = (int)by - R; y <= (int)by + R; y++)
+        for (int x = (int)bx - R; x <= (int)bx + R; x++)
+            if (inb(x, y) && isFruitPlant(g->tiles[IDX(x, y)].obj) && g->fruitState[IDX(x, y)] == 1 && !someoneTargets(e, TK_PICK, x, y)) { startTask(e, TK_PICK, x, y); return; }
     if (dead >= 0) { startTask(e, TK_HARVEST, dead % WW, dead / WW); return; }
     if (dry >= 0) { startTask(e, TK_WATER, dry % WW, dry / WW); return; }
     if (poor >= 0 && (storageCount(I_COMPOST) > 0 || storageCount(I_MANURE) > 0)) { startTask(e, TK_FERT, poor % WW, poor / WW); return; }
     if (empty >= 0) {
-        int seeds = storageCount(I_WHEATSEED) + storageCount(I_POTATO) + storageCount(I_CABBAGESEED) + storageCount(I_BEANS);
+        int seeds = 0;
+        for (int c = 1; c < CR_COUNT; c++) seeds += storageCount(CROPS[c].seed);
         if (seeds > 0 && (plantSeason(CR_CABBAGE, empty) || plantSeason(CR_WHEAT, empty))) { startTask(e, TK_PLANT, empty % WW, empty / WW); return; }
     }
     // expand the farm when there are spare seeds
@@ -1189,6 +1493,7 @@ static void planWoodcutter(Ent& e, float bx, float by) {
             if (!inb(x, y)) continue;
             uint8_t o = g->tiles[IDX(x, y)].obj;
             if (!isTree(o) && o != O_STUMP) continue;
+            if (isFruitTree(o) || (g->tiles[IDX(x, y)].var & VAR_GUARD)) continue;   // orchards and protected trees stay
             if (someoneTargets(e, TK_CHOP, x, y)) continue;
             float d = dist(e.x, e.y, x, y);
             bool nearStruct = false;
@@ -1218,6 +1523,10 @@ static void planHerder(Ent& e, float bx, float by) {
         if (a.kind == E_SHEEP && shears && !someoneTargets(e, TK_SHEAR, a.id, 0)) { startTask(e, TK_SHEAR, a.id, 0); return; }
         if (a.kind == E_BUFFALO && !someoneTargets(e, TK_MILK, a.id, 0)) { startTask(e, TK_MILK, a.id, 0); return; }
     }
+    // take honey from full hives
+    for (int y = (int)by - 26; y <= (int)by + 26; y++)
+        for (int x = (int)bx - 26; x <= (int)bx + 26; x++)
+            if (inb(x, y) && g->tiles[IDX(x, y)].obj == O_BEEHIVE && g->tiles[IDX(x, y)].timer >= 2 && !someoneTargets(e, TK_HONEY, x, y)) { startTask(e, TK_HONEY, x, y); return; }
     // collect eggs and manure
     int best = -1; float bd = 1e9f;
     for (int y = (int)by - 26; y <= (int)by + 26; y++)
@@ -1247,9 +1556,42 @@ static void planCook(Ent& e, float bx, float by) {
     if (e.carry.id) { startTask(e, TK_DELIVER, 0, 0); return; }
     int fx, fy;
     if (!nearObj(bx, by, O_CAMPFIRE, 30, &fx, &fy)) return;
-    if (storageCount(I_RAWMEAT) > 0 || storageCount(I_WHEAT) >= 3 + 20 ||
+    if (storageCount(I_RAWMEAT) > 0 || storageCount(I_FISH) > 0 || storageCount(I_WHEAT) >= 3 + 20 ||
         (storageCount(I_POTATO) >= 2 && storageCount(I_CABBAGE) >= 1 && storageCount(I_BEANS) >= 2))
         startTask(e, TK_COOK, fx, fy);
+}
+
+static void planRepair(Ent& e, float bx, float by) {
+    int best = -1; float bd = 1e9f;
+    for (int y = (int)by - 40; y <= (int)by + 40; y++)
+        for (int x = (int)bx - 40; x <= (int)bx + 40; x++) {
+            if (!inb(x, y) || !lineBroken(g->tiles[IDX(x, y)]) || someoneTargets(e, TK_REPAIR, x, y)) continue;
+            float d = dist(e.x, e.y, x, y);
+            if (d < bd) { bd = d; best = IDX(x, y); }
+        }
+    if (best >= 0) startTask(e, TK_REPAIR, best % WW, best / WW);
+    else startTask(e, TK_PATROL, (int)bx + rndi(-12, 12), (int)by + rndi(-12, 12));   // walk the lines
+}
+
+static void planMiner(Ent& e, float bx, float by) {
+    if (e.carry.id) { startTask(e, TK_DELIVER, 0, 0); return; }
+    int mx, my;
+    if (nearObj(bx, by, O_MINE, 40, &mx, &my)) startTask(e, TK_MINE, mx, my);
+}
+
+static void planFisher(Ent& e, float bx, float by) {
+    if (e.carry.id) { startTask(e, TK_DELIVER, 0, 0); return; }
+    if (storageCount(I_FISH) + storageCount(I_COOKEDFISH) >= 40) { startTask(e, TK_PATROL, (int)bx + rndi(-5, 5), (int)by + rndi(-5, 5)); return; }   // plenty for now
+    // a quiet bank spot near the farm
+    float bd = 1e9f; int fx = -1, fy = -1;
+    for (int y = (int)by - 30; y <= (int)by + 30; y++)
+        for (int x = (int)bx - 30; x <= (int)bx + 30; x++) {
+            if (!inb(x, y) || isWater(x, y) || solidFor(x, y, 2) || unreachable(x, y)) continue;
+            if (!(isWater(x + 1, y) || isWater(x - 1, y) || isWater(x, y + 1) || isWater(x, y - 1))) continue;
+            float d = dist(e.x, e.y, x, y) + rndr(0, 6);
+            if (d < bd) { bd = d; fx = x; fy = y; }
+        }
+    if (fx >= 0) startTask(e, TK_FISH, fx, fy);
 }
 
 static void planGuard(Ent& e, float bx, float by) {
@@ -1272,7 +1614,7 @@ static bool deliverCarry(Ent& e, float dt) {
         for (auto& s : c.slots) if (!s.id || (s.id == e.carry.id && s.n < ITEMS[s.id].stack)) space = true;
         if (!space) continue;
         float d = dist(e.x, e.y, c.x, c.y);
-        if (!toCompost && isFood(e.carry.id)) d -= (c.kind == C_FRIDGE && g->powered) ? 30 : (c.kind == C_CELLAR || c.kind == C_GRANARY ? 20 : 0);
+        if (!toCompost && isFood(e.carry.id)) d -= (c.kind == C_FRIDGE && poweredAt(c.x, c.y)) ? 30 : (c.kind == C_CELLAR || c.kind == C_GRANARY ? 20 : 0);
         if (d < bd) { bd = d; dest = (int)i; }
     }
     if (dest < 0 && toCompost) {  // no compost bin, use any storage
@@ -1297,19 +1639,35 @@ static bool deliverCarry(Ent& e, float dt) {
         int left = addItem(c.slots.data(), (int)c.slots.size(), e.carry.id, e.carry.n, e.carry.fresh);
         if (left > 0) e.carry.n = (int16_t)left; else e.carry = Stack{};
         if (c.kind == C_GRANARY || c.kind == C_CELLAR) g->stats.usedGranary = true;
+        for (auto& h : e.haul) storeAnywhere(h.id, h.n, h.fresh, e.x, e.y);
+        e.haul.clear();
         return true;
     }
     return false;
 }
 
 static void runTask(Ent& e, float dt) {
-    float spd = SPECIES[E_WORKER].speed;
+    float rate = workRate(e);
+    float spd = SPECIES[E_WORKER].speed * rate;
+    float wdt = dt * rate;   // work done this tick
     int tx = e.state, ty = e.target;
     e.timer -= dt;
     if (e.timer <= 0) { finishTask(e); return; }
     auto at = [&](int x, int y, float r = 1.3f) {
         int res = goTo(e, x, y, spd, dt, r);
-        if (res == -1) finishTask(e);
+        if (res == -1) {
+            // can't get there: take a breather instead of retrying every frame, and tell the player
+            finishTask(e);
+            e.blocked = 3.f;
+            if (inb(x, y)) unreachableUntil[IDX(x, y)] = g->totalTime + 120.f;
+            static float lastWarn = -1000;
+            uint8_t o = inb(x, y) ? g->tiles[IDX(x, y)].obj : 0;
+            bool useful = o && (OBJS[o].slots > 0 || o == O_BED || o == O_WELL || o == O_CAMPFIRE || o == O_MINE || o == O_BEEHIVE);
+            if (useful && (g->totalTime - lastWarn > 90 || g->totalTime < lastWarn)) {   // only nag about buildings workers rely on
+                lastWarn = g->totalTime;
+                logMsg(e.name + " can't reach the " + OBJS[o].name + " - check doors and paths.", ORANGE);
+            }
+        }
         return res == 1;
     };
     auto fetch = [&](int id, int n) -> bool {  // stage helper: go to storage holding item and take it
@@ -1328,11 +1686,12 @@ static void runTask(Ent& e, float dt) {
     switch (e.task) {
         case TK_EAT: {
             int ci = -1;
-            int food = bestFood(e.x, e.y, ci);
+            int food = bestFood(e.x, e.y, ci, &e);
             if (!food) { finishTask(e); return; }
             Container& c = g->conts[ci];
             if (!at(c.x, c.y, 1.4f)) return;
             if (takeItem(c.slots.data(), (int)c.slots.size(), food, 1)) {
+                e.diet[e.dietI] = (uint8_t)food; e.dietI = (uint8_t)((e.dietI + 1) % 12);
                 e.hunger = std::min(100.f, e.hunger + ITEMS[food].food * 2.2f);
                 e.thirst = std::min(100.f, e.thirst + ITEMS[food].drink);
                 g->stats.foodEaten += ITEMS[food].food;
@@ -1360,7 +1719,12 @@ static void runTask(Ent& e, float dt) {
             return;
         case TK_HARVEST: {
             if (!g->crops[IDX(tx, ty)].type) { finishTask(e); return; }
-            if (at(tx, ty)) { harvestCrop(tx, ty, true, e.x, e.y); e.timer2 = 0; finishTask(e); }
+            if (at(tx, ty)) {
+                Crop& cc = g->crops[IDX(tx, ty)];
+                if (cc.manure && !cc.dead) plowUnder(tx, ty);   // green manure goes back into the ground
+                else { if (cc.dead) toCompost(I_MOLDY, 1, e.x, e.y); harvestCrop(tx, ty, true, e.x, e.y); }
+                e.timer2 = 0; finishTask(e);
+            }
             return;
         }
         case TK_WATER: {
@@ -1396,8 +1760,10 @@ static void runTask(Ent& e, float dt) {
                     for (int x = tx - 3; x <= tx + 3 && e.carry.n > 0; x++) {
                         if (!inb(x, y)) continue;
                         int i = IDX(x, y);
-                        if ((g->ground[i] == G_TILLED || g->ground[i] == G_GREENHOUSE) && g->fert[i] < 0.6f) {
-                            g->fert[i] = std::min(1.4f, g->fert[i] + (e.carry.id == I_COMPOST ? 0.4f : 0.2f));
+                        if ((g->ground[i] == G_TILLED || g->ground[i] == G_GREENHOUSE) && soilMin(i) < 0.6f) {
+                            float q = e.carry.fresh;
+                            if (e.carry.id == I_COMPOST) addNutrients(i, 0.1f + 0.2f * q, 0.08f + 0.15f * q, 0.08f + 0.15f * q);
+                            else addNutrients(i, 0.2f, 0.06f, 0.08f);
                             e.carry.n--;
                         }
                     }
@@ -1411,11 +1777,25 @@ static void runTask(Ent& e, float dt) {
             if (g->crops[i].type || g->tiles[i].obj) { if (e.carry.id) startTask(e, TK_DELIVER, 0, 0); else finishTask(e); return; }
             if (e.taskStage == 0) {
                 // crop rotation: depleted soil gets beans; otherwise the most plentiful seed
+                // read the soil: nitrogen-poor gets legumes, phosphorus/potassium-poor gets buckwheat, both as green manure
                 int choice = 0;
-                if (g->fert[i] < 0.35f && storageCount(I_BEANS) > 0 && plantSeason(CR_BEANS, i)) choice = I_BEANS;
+                bool manure = false;
+                if (g->fert[i] < 0.35f) {
+                    for (int id : {I_GREENBEANSEED, I_BEANS}) if (!choice && storageCount(id) > 0) { choice = id; manure = true; }
+                } else if (g->phos[i] < 0.35f || g->pota[i] < 0.35f) {
+                    if (storageCount(I_BUCKWHEAT) > 0) { choice = I_BUCKWHEAT; manure = true; }
+                    else if (storageCount(I_MUSTARDSEED) > 0) { choice = I_MUSTARDSEED; manure = true; }
+                }
+                if (choice) {
+                    int crop = 0;
+                    for (int c = 1; c < CR_COUNT; c++) if (CROPS[c].seed == choice) crop = c;
+                    if (!plantSeason(crop, i)) { choice = 0; manure = false; }
+                }
+                e.state2 = manure;
                 if (!choice) {
                     int bestN = 0;
                     for (int c = 1; c < CR_COUNT; c++) {
+                        if (c == CR_BUCKWHEAT || c == CR_MUSTARD) continue;
                         int n = storageCount(CROPS[c].seed);
                         if (n > bestN && plantSeason(c, i)) { bestN = n; choice = CROPS[c].seed; }
                     }
@@ -1428,7 +1808,8 @@ static void runTask(Ent& e, float dt) {
             if (at(tx, ty)) {
                 int crop = 0;
                 for (int c = 1; c < CR_COUNT; c++) if (CROPS[c].seed == e.carry.id) crop = c;
-                if (crop) { g->crops[i] = Crop{}; g->crops[i].type = (uint8_t)crop; }
+                tillInLitter(i);   // the bed is worked before sowing
+                if (crop) { g->crops[i] = Crop{}; g->crops[i].type = (uint8_t)crop; g->crops[i].manure = e.state2 != 0; }
                 e.carry = Stack{};
                 finishTask(e);
             }
@@ -1438,7 +1819,7 @@ static void runTask(Ent& e, float dt) {
             if (at(tx, ty)) {
                 int i = IDX(tx, ty);
                 if (g->tiles[i].obj == O_TALLGRASS) removeObject(tx, ty, false);
-                if (!g->tiles[i].obj) g->ground[i] = G_TILLED;
+                if (!g->tiles[i].obj) { g->ground[i] = G_TILLED; tillInLitter(i); }
                 finishTask(e);
             }
             return;
@@ -1446,7 +1827,7 @@ static void runTask(Ent& e, float dt) {
             uint8_t o = g->tiles[IDX(tx, ty)].obj;
             if (!isTree(o) && o != O_STUMP) { finishTask(e); return; }
             if (!at(tx, ty)) return;
-            e.timer2 += dt;
+            e.timer2 += wdt;
             e.anim += dt * 6;
             if (rnd() < dt * 3) burst(tx + 0.5f, ty + 0.5f, Color{180, 140, 90, 255}, 2, 0.5f);
             if (e.timer2 > (o == O_STUMP ? 1.5f : 4.f)) {
@@ -1456,8 +1837,8 @@ static void runTask(Ent& e, float dt) {
                 else {
                     placeObject(tx, ty, O_STUMP);
                     e.carry = Stack{I_WOOD, (int16_t)rndi(4, 6), 1};
-                    if (rnd() < 0.6f) storeAnywhere(I_SAPLING, 1, 1, e.x, e.y);
-                    storeAnywhere(I_LEAVES, 2, 1, e.x, e.y);
+                    if (rnd() < 0.6f) storeAnywhere(saplingFor(o), 1, 1, e.x, e.y);
+                    toCompost(I_LEAVES, 2, e.x, e.y);
                 }
                 startTask(e, TK_DELIVER, 0, 0);
             }
@@ -1531,6 +1912,7 @@ static void runTask(Ent& e, float dt) {
                 // pick a recipe: meat first, then stew, then bread
                 int id = 0, n = 0;
                 if (storageCount(I_RAWMEAT) > 0) { id = I_RAWMEAT; n = std::min(5, storageCount(I_RAWMEAT)); }
+                else if (storageCount(I_FISH) > 0) { id = I_FISH; n = std::min(5, storageCount(I_FISH)); }
                 else if (storageCount(I_POTATO) >= 2 && storageCount(I_CABBAGE) >= 1 && storageCount(I_BEANS) >= 2) {
                     takeFromStorage(I_POTATO, 2, e.x, e.y); takeFromStorage(I_CABBAGE, 1, e.x, e.y); takeFromStorage(I_BEANS, 2, e.x, e.y);
                     e.carry = Stack{I_STEW, 0, 1}; e.taskStage = 1; return;
@@ -1540,14 +1922,73 @@ static void runTask(Ent& e, float dt) {
                 return;
             }
             if (!at(tx, ty, 1.5f)) return;
-            e.timer2 += dt;
+            e.timer2 += wdt;
             if (e.timer2 < 3.f) return;
             e.timer2 = 0;
             if (e.carry.id == I_RAWMEAT) e.carry = Stack{I_COOKEDMEAT, e.carry.n, 1};
+            else if (e.carry.id == I_FISH) e.carry = Stack{I_COOKEDFISH, e.carry.n, 1};
             else if (e.carry.id == I_WHEAT) e.carry = Stack{I_BREAD, (int16_t)(e.carry.n / 3), 1};
             else if (e.carry.id == I_STEW) e.carry = Stack{I_STEW, 1, 1};
             g->stats.foodMade += ITEMS[e.carry.id].food * e.carry.n * 0.3f;
             startTask(e, TK_DELIVER, 0, 0);
+            return;
+        }
+        case TK_REPAIR:
+            if (!lineBroken(g->tiles[IDX(tx, ty)])) { finishTask(e); return; }
+            if (!at(tx, ty, 1.1f)) return;
+            e.timer2 += wdt;
+            e.anim += dt * 4;
+            if (e.timer2 > 3.f) { e.timer2 = 0; repairLine(tx, ty); finishTask(e); }
+            return;
+        case TK_HONEY:
+            if (g->tiles[IDX(tx, ty)].obj != O_BEEHIVE) { finishTask(e); return; }
+            if (at(tx, ty, 1.4f)) {
+                int n = collectHoney(tx, ty);
+                if (n) { e.carry = Stack{I_HONEY, (int16_t)n, 1}; g->stats.foodMade += ITEMS[I_HONEY].food * n; startTask(e, TK_DELIVER, 0, 0); }
+                else finishTask(e);
+            }
+            return;
+        case TK_PICK:
+            if (!isFruitPlant(g->tiles[IDX(tx, ty)].obj) || g->fruitState[IDX(tx, ty)] != 1) { finishTask(e); return; }
+            if (!at(tx, ty, 1.4f)) return;
+            e.timer2 += wdt;
+            if (e.timer2 > 2.f) { e.timer2 = 0; harvestFruit(tx, ty, true, e.x, e.y); finishTask(e); }
+            return;
+        case TK_MINE: {
+            if (g->tiles[IDX(tx, ty)].obj != O_MINE) { e.hidden = false; finishTask(e); return; }
+            if (!e.hidden) {
+                if (!at(tx, ty, 1.2f)) return;
+                e.hidden = true; e.x = tx + 0.5f; e.y = ty + 0.9f; e.timer2 = 0; e.timer = 400;
+                return;
+            }
+            e.timer2 += wdt;
+            if (e.timer2 < 50.f) return;   // a shift underground
+            e.timer2 = 0; e.hidden = false;
+            for (int k = 0; k < 8; k++) {   // climb out onto a free tile beside the entrance
+                int ox = tx + (k % 3) - 1, oy = ty + 1 - (k / 3);
+                if (!solidFor(ox, oy, 2) && !isWater(ox, oy)) { e.x = ox + 0.5f; e.y = oy + 0.5f; break; }
+            }
+            bool rocky = g->ground[IDX(tx, ty)] == G_STONE;
+            float m = rocky ? 1.f : 0.4f;
+            e.haul.clear();
+            e.carry = storageCount(I_STONE) < 150 ? Stack{I_STONE, (int16_t)rndi(4, 8), 1} : Stack{};   // enough stone: only bring ore
+            auto find = [&](int id, float chance, int lo, int hi) { if (rnd() < chance * m) e.haul.push_back(Stack{(uint8_t)id, (int16_t)rndi(lo, hi), 1}); };
+            find(I_IRONORE, 0.7f, 1, 3); find(I_ORE, 0.5f, 1, 2); find(I_QUARTZ, 0.3f, 1, 2); find(I_FLINT, 0.4f, 1, 2); find(I_CLAY, 0.3f, 1, 3);
+            floatText(e.x, e.y - 1, "Ore!", Color{230, 200, 150, 255});
+            if (!e.carry.id && !e.haul.empty()) { e.carry = e.haul.back(); e.haul.pop_back(); }
+            startTask(e, TK_DELIVER, 0, 0);
+            return;
+        }
+        case TK_FISH: {
+            if (!at(tx, ty, 0.8f)) return;
+            e.timer2 += wdt;
+            e.face = isWater(tx + 1, ty) ? 1.f : -1.f;
+            float catchTime = (g->season() == 3 ? 40.f : 25.f) * (g->tod > 0.75f || g->tod < 0.3f ? 0.7f : 1.f);
+            if (e.timer2 < catchTime) return;
+            e.timer2 = 0;
+            if (e.carry.id == I_FISH) e.carry.n++; else e.carry = Stack{I_FISH, 1, 1};
+            g->stats.foodMade += ITEMS[I_FISH].food;
+            if (e.carry.n >= 4) startTask(e, TK_DELIVER, 0, 0);
             return;
         }
         case TK_PATROL:
@@ -1581,6 +2022,8 @@ static void updateWorker(Ent& e, float dt) {
         if (e.bed < 0) { e.mood -= 34; why = "no bed indoors"; }
         if (e.hunger < 15) { e.mood -= 34; why += why.empty() ? "hungry" : ", hungry"; }
         if (e.thirst < 15) { e.mood -= 34; why += why.empty() ? "thirsty" : ", thirsty"; }
+        e.mood = clampf(e.mood + clampf(farmBeauty() / 10.f, -3, 6), 0, 100);   // a lovely farm is a happy farm
+        e.mood = clampf(e.mood + (dietVariety(e) - 3) * 2.5f, 0, 100);          // the same meal every day wears thin
         if (why.empty()) e.mood = std::min(100.f, e.mood + 20);
         else logMsg(e.name + " is unhappy: " + why + ".", ORANGE);
         if (e.mood <= 0) {
@@ -1606,20 +2049,33 @@ static void updateWorker(Ent& e, float dt) {
         e.sleeping = false;
         if (dist(e.x, e.y, threat->x, threat->y) < 1.0f) {
             e.timer2 -= dt;
-            if (e.timer2 <= 0) { e.timer2 = 0.9f; damageEnt(*threat, e.job == J_GUARD ? 15 : 7, e.x, e.y); }
+            if (e.timer2 <= 0) {
+                e.timer2 = 0.9f;
+                damageEnt(*threat, e.job == J_GUARD ? 15 : 7, e.x, e.y);
+                if (threat->kind == E_PORCUPINE && e.job != J_GUARD) damageEnt(e, 3, threat->x, threat->y);
+            }
         } else chase(e, threat->x, threat->y, SPECIES[E_WORKER].speed * 1.1f, dt, false);
         return;
     }
 
+    if (e.hidden && e.task == TK_MINE) { runTask(e, dt); return; }
     // walk to the farm after being recruited
-    if (dist(e.x, e.y, bx, by) > 40 && e.task != TK_GOHOME) { startTask(e, TK_GOHOME, (int)bx, (int)by); e.timer = 300; }
+    if (dist(e.x, e.y, bx, by) > 40 && e.task != TK_GOHOME && e.blocked <= 0) {
+        if (e.age > 60.f) {   // stranded with no path home: they find their own way back
+            e.x = bx + 0.5f; e.y = by + 0.5f; e.age = 0; e.path.clear();
+            logMsg(e.name + " found their way back to the farm.", LIGHTGRAY);
+        } else { startTask(e, TK_GOHOME, (int)bx, (int)by); e.timer = 300; }
+    }
+    if (dist(e.x, e.y, bx, by) > 40 && e.blocked > 0) e.age += dt;
+    else if (dist(e.x, e.y, bx, by) <= 40) e.age = 0;
 
     bool night = g->tod > 0.84f || g->tod < 0.24f;
+    if (e.blocked > 0) e.blocked -= dt;
     if (e.task == TK_NONE || (e.task != TK_SLEEP && night && e.task != TK_GOHOME && !e.carry.id)) {
         if (night && e.bed >= 0) startTask(e, TK_SLEEP, 0, 0);
         else if (e.thirst < 40) startTask(e, TK_DRINK, 0, 0);
         else if (e.hunger < 40) { int ci; if (bestFood(e.x, e.y, ci)) startTask(e, TK_EAT, 0, 0); }
-        if (e.task == TK_NONE) {
+        if (e.task == TK_NONE && e.blocked <= 0) {
             if (e.carry.id) startTask(e, TK_DELIVER, 0, 0);
             else if (!night) {
                 switch (e.job) {
@@ -1628,6 +2084,9 @@ static void updateWorker(Ent& e, float dt) {
                     case J_HERDER: planHerder(e, bx, by); break;
                     case J_COOK: planCook(e, bx, by); break;
                     case J_GUARD: planGuard(e, bx, by); break;
+                    case J_REPAIR: planRepair(e, bx, by); break;
+                    case J_MINER: planMiner(e, bx, by); break;
+                    case J_FISHER: planFisher(e, bx, by); break;
                     default: break;
                 }
             }
@@ -1667,8 +2126,9 @@ static void updateRaider(Ent& e, float dt) {
     }
     // state 2: raiding
     float pd = dist(e.x, e.y, p.x, p.y);
-    Ent* foe = nearestEnt(e.x, e.y, 5, isFarmPerson);
-    if (pd < 5 && (!foe || pd < dist(e.x, e.y, foe->x, foe->y))) {
+    // raiders want loot: they only fight whoever gets in their way
+    Ent* foe = nearestEnt(e.x, e.y, 2.5f, isFarmPerson);
+    if (pd < 2.5f && (!foe || pd < dist(e.x, e.y, foe->x, foe->y))) {
         if (pd < 1.0f) melee(e, nullptr, true, dt); else chase(e, p.x, p.y, spd, dt, false);
         return;
     }

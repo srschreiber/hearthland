@@ -4,3 +4,4 @@ compile_commands.json
 *.sav.tmp
 *.png
 .DS_Store
+*.log
